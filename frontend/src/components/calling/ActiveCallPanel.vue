@@ -114,6 +114,7 @@ async function handleAccept(id: string) {
         <!-- Accept incoming transfer (green) -->
         <Button
           v-if="firstWaiting"
+          variant="ghost"
           size="sm"
           class="h-10 w-10 rounded-full p-0 bg-green-600 hover:bg-green-500"
           :disabled="acceptingId === firstWaiting.id"
@@ -125,6 +126,7 @@ async function handleAccept(id: string) {
         <!-- Hangup / Decline (red) -->
         <Button
           v-if="store.isOnCall"
+          variant="ghost"
           size="sm"
           class="h-10 w-10 rounded-full p-0 bg-red-600 hover:bg-red-500"
           @click="store.endCall()"
