@@ -84,19 +84,18 @@ test.describe('Template Form Fields', () => {
 
     // Open the language combobox
     await langCombobox.click()
-    const popover = page.locator('[role="listbox"]')
-    await expect(popover).toBeVisible()
+    const searchInput = page.locator('input[placeholder="Search language..."]')
+    await expect(searchInput).toBeVisible()
 
     // Type to search for Hindi
-    const searchInput = popover.locator('input[placeholder="Search language..."]')
     await searchInput.fill('Hindi')
 
     // Should show Hindi in filtered results
-    const hindiOption = popover.locator('[role="option"]').filter({ hasText: 'Hindi' })
+    const hindiOption = page.locator('[role="option"]').filter({ hasText: 'Hindi' })
     await expect(hindiOption).toBeVisible()
 
     // Non-matching languages should be hidden
-    const frenchOption = popover.locator('[role="option"]').filter({ hasText: 'French' })
+    const frenchOption = page.locator('[role="option"]').filter({ hasText: 'French' })
     await expect(frenchOption).not.toBeVisible()
 
     // Select Hindi
@@ -104,21 +103,20 @@ test.describe('Template Form Fields', () => {
 
     // Combobox should now show Hindi and popover should close
     await expect(langCombobox).toContainText('Hindi')
-    await expect(popover).not.toBeVisible()
+    await expect(searchInput).not.toBeVisible()
   })
 
   test('should show no results for invalid language search', async ({ page }) => {
     const langCombobox = templatesPage.dialog.locator('label').filter({ hasText: /^Language/ }).locator('..').locator('[role="combobox"]')
 
     await langCombobox.click()
-    const popover = page.locator('[role="listbox"]')
-    await expect(popover).toBeVisible()
+    const searchInput = page.locator('input[placeholder="Search language..."]')
+    await expect(searchInput).toBeVisible()
 
-    const searchInput = popover.locator('input[placeholder="Search language..."]')
     await searchInput.fill('xyznonexistent')
 
     // Should show "No language found" empty state
-    await expect(popover.getByText('No language found.')).toBeVisible()
+    await expect(page.getByText('No language found.')).toBeVisible()
   })
 
   test('should have category selector', async () => {
