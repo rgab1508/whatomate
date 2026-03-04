@@ -183,51 +183,78 @@ func (m *Manager) executeGreeting(session *CallSession, node *IVRNode, player *A
 	return "default"
 }
 
-// executeMenu plays a prompt, waits for single DTMF, branches by digit.
+// executeMenu plays a prompt, waits for single DTMF, validates against
+// configured options, and retries on timeout or invalid digit.
+// Returns "digit:N" on valid input, "timeout" on single-attempt timeout,
+// or "max_retries" when all attempts are exhausted.
 func (m *Manager) executeMenu(session *CallSession, node *IVRNode, player *AudioPlayer) string {
 	audioFile, _ := node.Config["audio_file"].(string)
 	timeoutSecs := getConfigInt(node.Config, "timeout_seconds", 10)
 	maxRetries := getConfigInt(node.Config, "max_retries", 3)
+	timeout := time.Duration(timeoutSecs) * time.Second
 
-	m.drainDTMF(session)
-
-	var digit byte
-	var ok bool
-
-	if audioFile != "" && m.config.AudioDir != "" {
-		fullPath := filepath.Join(m.config.AudioDir, audioFile)
-
-		// Play interruptible + collect first digit
-		playDone := make(chan struct{})
-		go func() {
-			if _, err := player.PlayFile(fullPath); err != nil {
-				m.log.Error("Failed to play menu audio", "error", err, "call_id", session.ID)
-			}
-			close(playDone)
-		}()
-
-		select {
-		case <-playDone:
-			digit, ok = m.waitForDTMF(session, time.Duration(timeoutSecs)*time.Second, maxRetries)
-		case d, chOk := <-session.DTMFBuffer:
-			player.Stop()
-			<-playDone
-			player.ResetAfterInterrupt()
-			if chOk {
-				digit = d
-				ok = true
-			}
+	// Build set of valid digits from menu options
+	validDigits := make(map[string]bool)
+	if opts, ok := node.Config["options"].(map[string]interface{}); ok {
+		for digit := range opts {
+			validDigits[digit] = true
 		}
-	} else {
-		digit, ok = m.waitForDTMF(session, time.Duration(timeoutSecs)*time.Second, maxRetries)
 	}
 
-	if !ok {
-		// Distinguish timeout vs max_retries — waitForDTMF exhausts all retries
-		return "timeout"
+	var fullPath string
+	if audioFile != "" && m.config.AudioDir != "" {
+		fullPath = filepath.Join(m.config.AudioDir, audioFile)
 	}
 
-	return fmt.Sprintf("digit:%s", string(digit))
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		m.drainDTMF(session)
+
+		var digit byte
+		var gotDigit bool
+
+		if fullPath != "" {
+			// Play audio prompt (interruptible by DTMF)
+			playDone := make(chan struct{})
+			go func() {
+				if _, err := player.PlayFile(fullPath); err != nil {
+					m.log.Error("Failed to play menu audio", "error", err, "call_id", session.ID)
+				}
+				close(playDone)
+			}()
+
+			select {
+			case <-playDone:
+				// Audio finished playing, wait for digit input
+				digit, gotDigit = m.waitForDTMF(session, timeout, 1)
+			case d, chOk := <-session.DTMFBuffer:
+				// Caller interrupted audio with a digit
+				player.Stop()
+				<-playDone
+				player.ResetAfterInterrupt()
+				if chOk {
+					digit = d
+					gotDigit = true
+				}
+			}
+		} else {
+			digit, gotDigit = m.waitForDTMF(session, timeout, 1)
+		}
+
+		if !gotDigit {
+			m.log.Debug("Menu timeout", "call_id", session.ID, "attempt", attempt+1)
+			continue
+		}
+
+		digitStr := string(digit)
+		if len(validDigits) == 0 || validDigits[digitStr] {
+			return fmt.Sprintf("digit:%s", digitStr)
+		}
+
+		// Invalid digit — log and retry with prompt replay
+		m.log.Debug("Menu invalid digit", "call_id", session.ID, "digit", digitStr, "attempt", attempt+1)
+	}
+
+	return "max_retries"
 }
 
 // executeGather collects multi-digit input, stores in context.
