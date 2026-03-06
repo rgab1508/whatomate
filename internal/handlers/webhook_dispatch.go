@@ -36,6 +36,13 @@ type MessageEventData struct {
 	SentByUserID    string             `json:"sent_by_user_id,omitempty"`
 }
 
+// RawMessageEventData represents the raw Meta webhook payload for message.raw events
+type RawMessageEventData struct {
+	PhoneNumberID   string                 `json:"phone_number_id"`
+	DisplayPhoneNum string                 `json:"display_phone_number,omitempty"`
+	Raw             map[string]interface{} `json:"raw"`
+}
+
 // ContactEventData represents data for contact events
 type ContactEventData struct {
 	ContactID       string `json:"contact_id"`

@@ -282,6 +282,7 @@ func (a *App) WebhookHandler(r *fastglue.Request) error {
 			}
 
 			phoneNumberID := change.Value.Metadata.PhoneNumberID
+			displayPhoneNumber := change.Value.Metadata.DisplayPhoneNumber
 
 			// Verify webhook signature on first message processing (uses cached account)
 			if !signatureVerified && len(signature) > 0 && phoneNumberID != "" {
@@ -333,7 +334,7 @@ func (a *App) WebhookHandler(r *fastglue.Request) error {
 				}
 
 				// Process message asynchronously
-				go a.processIncomingMessage(phoneNumberID, msg, profileName)
+				go a.processIncomingMessage(phoneNumberID, displayPhoneNumber, msg, profileName)
 			}
 
 			// Process status updates
@@ -352,7 +353,7 @@ func (a *App) WebhookHandler(r *fastglue.Request) error {
 	return r.SendEnvelope(map[string]string{"status": "ok"})
 }
 
-func (a *App) processIncomingMessage(phoneNumberID string, msg interface{}, profileName string) {
+func (a *App) processIncomingMessage(phoneNumberID, displayPhoneNumber string, msg interface{}, profileName string) {
 	// Convert msg interface to the message struct
 	msgBytes, err := json.Marshal(msg)
 	if err != nil {
@@ -366,6 +367,10 @@ func (a *App) processIncomingMessage(phoneNumberID string, msg interface{}, prof
 		return
 	}
 
+	// Preserve raw Meta payload for message.raw webhook
+	var rawMsg map[string]interface{}
+	_ = json.Unmarshal(msgBytes, &rawMsg)
+
 	// Check for duplicate message - Meta sometimes sends the same message multiple times
 	if textMsg.ID != "" {
 		var existingMsg models.Message
@@ -376,7 +381,7 @@ func (a *App) processIncomingMessage(phoneNumberID string, msg interface{}, prof
 	}
 
 	// Process the message with chatbot logic
-	a.processIncomingMessageFull(phoneNumberID, textMsg, profileName)
+	a.processIncomingMessageFull(phoneNumberID, displayPhoneNumber, textMsg, rawMsg, profileName)
 }
 
 func (a *App) processStatusUpdate(phoneNumberID string, status WebhookStatus) {
