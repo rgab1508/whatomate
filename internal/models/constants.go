@@ -198,6 +198,7 @@ type WebhookEvent string
 
 const (
 	WebhookEventMessageIncoming  WebhookEvent = "message.incoming"
+	WebhookEventMessageRaw       WebhookEvent = "message.raw"
 	WebhookEventMessageOutgoing  WebhookEvent = "message.outgoing"
 	WebhookEventMessageSent      WebhookEvent = "message.sent"
 	WebhookEventContactCreated   WebhookEvent = "contact.created"
