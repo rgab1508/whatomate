@@ -1003,7 +1003,11 @@ func (a *App) processFlowResponse(account *models.WhatsAppAccount, session *mode
 	// Determine next step
 	nextStepName := currentStep.NextStep
 	if nextStepName == "" && currentStepIndex+1 < len(flow.Steps) {
-		nextStepName = flow.Steps[currentStepIndex+1].StepName
+		candidateName := flow.Steps[currentStepIndex+1].StepName
+		// Don't fall through sequentially into a branch target step
+		if !isBranchTarget(candidateName, flow) {
+			nextStepName = candidateName
+		}
 	}
 
 	// Check conditional next - use buttonID first (for button/list responses), then userInput
@@ -1328,10 +1332,13 @@ func (a *App) sendStepWithSkipCheck(account *models.WhatsAppAccount, session *mo
 		// Find next step
 		nextStepName := step.NextStep
 		if nextStepName == "" {
-			// Find by step order
+			// Find by step order (don't fall through into branch targets)
 			for i, s := range flow.Steps {
 				if s.StepName == step.StepName && i+1 < len(flow.Steps) {
-					nextStepName = flow.Steps[i+1].StepName
+					candidate := flow.Steps[i+1].StepName
+					if !isBranchTarget(candidate, flow) {
+						nextStepName = candidate
+					}
 					break
 				}
 			}
@@ -1367,6 +1374,12 @@ func (a *App) sendStepWithSkipCheck(account *models.WhatsAppAccount, session *mo
 		return
 	}
 
+	// Handle branch step - evaluate condition and route to correct path without sending a message
+	if step.MessageType == models.FlowStepTypeBranch {
+		a.processBranchStep(account, session, contact, step, flow, skippedSteps)
+		return
+	}
+
 	// Not skipping - send the step message normally
 	a.sendStepMessage(account, session, contact, step)
 
@@ -1376,10 +1389,13 @@ func (a *App) sendStepWithSkipCheck(account *models.WhatsAppAccount, session *mo
 		// Find next step
 		nextStepName := step.NextStep
 		if nextStepName == "" {
-			// Find by step order
+			// Find by step order (don't fall through into branch targets)
 			for i, s := range flow.Steps {
 				if s.StepName == step.StepName && i+1 < len(flow.Steps) {
-					nextStepName = flow.Steps[i+1].StepName
+					candidate := flow.Steps[i+1].StepName
+					if !isBranchTarget(candidate, flow) {
+						nextStepName = candidate
+					}
 					break
 				}
 			}
@@ -1460,16 +1476,17 @@ func (a *App) sendStepMessage(account *models.WhatsAppAccount, session *models.C
 				a.DB.Model(session).Update("session_data", session.SessionData)
 			}
 
+			// why do you need api to send message??
 			// Check if API returned buttons
-			if len(apiResp.Buttons) > 0 {
-				if err := a.sendAndSaveInteractiveButtons(account, contact, message, apiResp.Buttons); err != nil {
-					a.Log.Error("Failed to send API response buttons", "error", err, "contact", contact.PhoneNumber)
-				}
-			} else {
-				if err := a.sendAndSaveTextMessage(account, contact, message); err != nil {
-					a.Log.Error("Failed to send API response message", "error", err, "contact", contact.PhoneNumber)
-				}
-			}
+			// if len(apiResp.Buttons) > 0 {
+			// 	if err := a.sendAndSaveInteractiveButtons(account, contact, message, apiResp.Buttons); err != nil {
+			// 		a.Log.Error("Failed to send API response buttons", "error", err, "contact", contact.PhoneNumber)
+			// 	}
+			// } else {
+			// 	if err := a.sendAndSaveTextMessage(account, contact, message); err != nil {
+			// 		a.Log.Error("Failed to send API response message", "error", err, "contact", contact.PhoneNumber)
+			// 	}
+			// }
 		}
 		a.logSessionMessage(session.ID, models.DirectionOutgoing, message, step.StepName)
 
@@ -2471,7 +2488,145 @@ func (a *App) isWithinBusinessHours(businessHours models.JSONBArray) bool {
 	return false
 }
 
-// shouldSkipStep evaluates a text expression like "(status == 'vip' OR amount > 100) AND name != ”"
+// processBranchStep evaluates a condition from input_config and routes to the true/false path via conditional_next
+// input_config: {"variable": "userExists", "operator": "equals", "value": "true"}
+// conditional_next: {"true": "step_a", "false": "step_b"}
+func (a *App) processBranchStep(account *models.WhatsAppAccount, session *models.ChatbotSession, contact *models.Contact, step *models.ChatbotFlowStep, flow *models.ChatbotFlow, skippedSteps map[string]bool) {
+	sessionData := session.SessionData
+	if sessionData == nil {
+		sessionData = models.JSONB{}
+	}
+
+	// Extract condition from input_config
+	variable, _ := step.InputConfig["variable"].(string)
+	operator, _ := step.InputConfig["operator"].(string)
+	value, _ := step.InputConfig["value"].(string)
+
+	if variable == "" {
+		a.Log.Warn("Branch step missing variable in input_config", "step", step.StepName)
+		a.completeFlow(account, session, contact, flow)
+		return
+	}
+
+	// Get the variable value from session data
+	varValue := sessionData[variable]
+
+	// Evaluate the condition
+	result := evaluateBranchCondition(varValue, operator, value)
+	a.Log.Info("Branch step evaluated", "step", step.StepName, "variable", variable, "operator", operator, "value", value, "varValue", varValue, "result", result)
+
+	// Determine next step based on result
+	branchKey := "false"
+	if result {
+		branchKey = "true"
+	}
+
+	var nextStepName string
+	if step.ConditionalNext != nil {
+		if next, ok := step.ConditionalNext[branchKey].(string); ok {
+			nextStepName = next
+		}
+	}
+
+	// Fallback to default or next sequential step
+	if nextStepName == "" {
+		if step.ConditionalNext != nil {
+			if defaultNext, ok := step.ConditionalNext["default"].(string); ok {
+				nextStepName = defaultNext
+			}
+		}
+	}
+	if nextStepName == "" {
+		nextStepName = step.NextStep
+	}
+	if nextStepName == "" {
+		// Find next sequential step
+		for i, s := range flow.Steps {
+			if s.StepName == step.StepName && i+1 < len(flow.Steps) {
+				nextStepName = flow.Steps[i+1].StepName
+				break
+			}
+		}
+	}
+
+	if nextStepName == "" {
+		a.completeFlow(account, session, contact, flow)
+		return
+	}
+
+	// Find and execute next step
+	var nextStep *models.ChatbotFlowStep
+	for i := range flow.Steps {
+		if flow.Steps[i].StepName == nextStepName {
+			nextStep = &flow.Steps[i]
+			break
+		}
+	}
+
+	if nextStep == nil {
+		a.Log.Warn("Branch target step not found, completing flow", "next_step", nextStepName)
+		a.completeFlow(account, session, contact, flow)
+		return
+	}
+
+	// Update session to next step
+	session.CurrentStep = nextStep.StepName
+	a.DB.Model(session).Updates(map[string]interface{}{
+		"current_step": nextStep.StepName,
+		"step_retries": 0,
+	})
+
+	// Recursively process next step
+	a.sendStepWithSkipCheck(account, session, contact, nextStep, flow, skippedSteps)
+}
+
+// isBranchTarget checks if a step name is a direct target of any branch step in the flow
+// This is used to prevent sequential fallthrough into branch-only steps
+func isBranchTarget(stepName string, flow *models.ChatbotFlow) bool {
+	for _, s := range flow.Steps {
+		if s.MessageType == models.FlowStepTypeBranch && s.ConditionalNext != nil {
+			if target, ok := s.ConditionalNext["true"].(string); ok && target == stepName {
+				return true
+			}
+			if target, ok := s.ConditionalNext["false"].(string); ok && target == stepName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// evaluateBranchCondition evaluates a single branch condition
+func evaluateBranchCondition(varValue interface{}, operator string, compareValue string) bool {
+	// Convert varValue to string for comparison
+	varStr := fmt.Sprintf("%v", varValue)
+
+	switch operator {
+	case "equals", "eq", "==":
+		return strings.EqualFold(varStr, compareValue)
+	case "not_equals", "neq", "!=":
+		return !strings.EqualFold(varStr, compareValue)
+	case "exists":
+		return varValue != nil
+	case "not_exists":
+		return varValue == nil
+	case "not_empty":
+		return varValue != nil && varStr != "" && varStr != "<nil>"
+	case "empty":
+		return varValue == nil || varStr == "" || varStr == "<nil>"
+	case "contains":
+		return strings.Contains(strings.ToLower(varStr), strings.ToLower(compareValue))
+	case "gt", ">":
+		return varStr > compareValue
+	case "lt", "<":
+		return varStr < compareValue
+	default:
+		// Default: check if variable is truthy
+		return varValue != nil && varStr != "" && varStr != "false" && varStr != "0" && varStr != "<nil>"
+	}
+}
+
+// shouldSkipStep evaluates a text expression like "(status == 'vip' OR amount > 100) AND name != ''"
 func (a *App) shouldSkipStep(step *models.ChatbotFlowStep, sessionData map[string]interface{}) bool {
 	if step.SkipCondition == "" {
 		a.Log.Debug("No skip condition for step", "step", step.StepName)
@@ -2562,7 +2717,7 @@ func splitByLogicOperator(expr, op string) []string {
 	return parts
 }
 
-// evaluateSingleCondition handles: phone != ” or age > 18 or status == 'confirmed'
+// evaluateSingleCondition handles: phone != " or age > 18 or status == 'confirmed'
 func evaluateSingleCondition(expr string, data map[string]interface{}) bool {
 	expr = strings.TrimSpace(expr)
 

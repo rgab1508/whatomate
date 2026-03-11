@@ -10,6 +10,7 @@ import {
   Globe,
   MessageCircle,
   Users,
+  GitMerge,
   Edit3,
   ExternalLink,
   Play
@@ -44,7 +45,8 @@ const messageTypeIcons: Record<string, any> = {
   buttons: MousePointerClick,
   api_fetch: Globe,
   whatsapp_flow: MessageCircle,
-  transfer: Users
+  transfer: Users,
+  branch: GitMerge
 }
 
 function handleSelectMessageType(type: string) {
@@ -114,7 +116,7 @@ const localListPickerOpen = computed({
                 @click="handleSelectMessageType(type)"
               >
                 <component :is="icon" class="h-3.5 w-3.5 mr-1.5" />
-                {{ type === 'api_fetch' ? 'API' : type === 'whatsapp_flow' ? 'Flow' : type.charAt(0).toUpperCase() + type.slice(1) }}
+                {{ type === 'api_fetch' ? 'API' : type === 'whatsapp_flow' ? 'Flow' : type === 'branch' ? 'Branch' : type.charAt(0).toUpperCase() + type.slice(1) }}
               </Button>
             </div>
           </div>
@@ -138,8 +140,8 @@ const localListPickerOpen = computed({
                 <!-- Chat Messages -->
                 <ScrollArea class="flex-1 p-4">
                   <div class="space-y-3">
-                  <!-- Bot Message Bubble -->
-                  <div class="flex justify-start">
+                  <!-- Bot Message Bubble (not shown for branch steps) -->
+                  <div v-if="selectedStep.message_type !== 'branch'" class="flex justify-start">
                     <div class="max-w-[85%]">
                       <div class="bg-white dark:bg-[#202c33] rounded-lg rounded-tl-none shadow-sm p-3">
                         <p v-if="selectedStep.message" class="text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap">{{ selectedStep.message }}</p>
@@ -182,7 +184,7 @@ const localListPickerOpen = computed({
                   </div>
 
                   <!-- User Response Placeholder -->
-                  <div v-if="selectedStep.message_type !== 'transfer'" class="flex justify-end">
+                  <div v-if="selectedStep.message_type !== 'transfer' && selectedStep.message_type !== 'branch'" class="flex justify-end">
                     <div class="max-w-[85%]">
                       <div class="bg-[#005c4b] light:bg-[#d9fdd3] rounded-lg rounded-tr-none shadow-sm p-3">
                         <p class="text-sm text-gray-200 light:text-gray-800 italic">
@@ -229,6 +231,28 @@ const localListPickerOpen = computed({
                     <div class="bg-blue-100 dark:bg-blue-900/30 text-xs text-blue-700 dark:text-blue-400 px-3 py-1.5 rounded-lg flex items-center gap-1.5">
                       <Globe class="h-3 w-3" />
                       <span>Message populated from API</span>
+                    </div>
+                  </div>
+
+                  <!-- Branch Info -->
+                  <div v-if="selectedStep.message_type === 'branch'" class="flex justify-center">
+                    <div class="bg-cyan-100 dark:bg-cyan-900/30 text-xs text-cyan-700 dark:text-cyan-400 px-4 py-3 rounded-lg space-y-2">
+                      <div class="flex items-center gap-1.5 font-medium">
+                        <GitMerge class="h-3.5 w-3.5" />
+                        <span>Branch Decision</span>
+                      </div>
+                      <div v-if="selectedStep.input_config?.variable" class="text-[11px]">
+                        If <code class="font-mono bg-cyan-200/50 dark:bg-cyan-800/50 px-1 rounded">{{ selectedStep.input_config.variable }}</code>
+                        {{ selectedStep.input_config.operator || 'is truthy' }}
+                        <template v-if="selectedStep.input_config.value && !['exists', 'not_exists', 'empty', 'not_empty'].includes(selectedStep.input_config.operator)">
+                          <code class="font-mono bg-cyan-200/50 dark:bg-cyan-800/50 px-1 rounded">{{ selectedStep.input_config.value }}</code>
+                        </template>
+                      </div>
+                      <div class="flex gap-3 text-[11px]">
+                        <span class="text-green-600">True → {{ selectedStep.conditional_next?.['true'] || 'next step' }}</span>
+                        <span class="text-red-600">False → {{ selectedStep.conditional_next?.['false'] || 'next step' }}</span>
+                      </div>
+                      <p class="text-[10px] opacity-70">No message is sent — this step only routes the flow.</p>
                     </div>
                   </div>
                   </div>

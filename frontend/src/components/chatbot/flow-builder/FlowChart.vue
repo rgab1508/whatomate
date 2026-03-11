@@ -12,6 +12,7 @@ import {
   Flag,
   Plus,
   GitBranch,
+  GitMerge,
   AlertTriangle
 } from 'lucide-vue-next'
 
@@ -72,7 +73,8 @@ const messageTypeIcons: Record<string, any> = {
   buttons: MousePointerClick,
   api_fetch: Globe,
   whatsapp_flow: MessageCircle,
-  transfer: Users
+  transfer: Users,
+  branch: GitMerge
 }
 
 const messageTypeColors: Record<string, string> = {
@@ -80,7 +82,8 @@ const messageTypeColors: Record<string, string> = {
   buttons: 'bg-purple-500',
   api_fetch: 'bg-orange-500',
   whatsapp_flow: 'bg-green-500',
-  transfer: 'bg-amber-500'
+  transfer: 'bg-amber-500',
+  branch: 'bg-cyan-500'
 }
 
 const lineColors = [
@@ -138,6 +141,44 @@ function hasButtons(step: FlowStep) {
   return step.message_type === 'buttons' && getReplyButtons(step).length > 0
 }
 
+// Check if step is a branch
+function isBranch(step: FlowStep) {
+  return step.message_type === 'branch'
+}
+
+// Check if a step is a direct target of any branch step (should not be reached via sequential fallthrough)
+function isBranchTargetStep(stepName: string): boolean {
+  return props.steps.some(s =>
+    s.message_type === 'branch' &&
+    s.conditional_next &&
+    (s.conditional_next['true'] === stepName || s.conditional_next['false'] === stepName)
+  )
+}
+
+// Get branch destinations (true/false paths)
+function getBranchDestinations(step: FlowStep, stepIdx: number): { trueDest: { targetIdx: number; targetName: string }; falseDest: { targetIdx: number; targetName: string } } {
+  const trueStepName = step.conditional_next?.['true']
+  const falseStepName = step.conditional_next?.['false']
+
+  const resolveTarget = (name: string | undefined) => {
+    if (name) {
+      const idx = props.steps.findIndex(s => s.step_name === name)
+      if (idx !== -1) return { targetIdx: idx, targetName: name }
+    }
+    // Default: next sequential step
+    const nextIdx = stepIdx + 1
+    if (nextIdx < props.steps.length) {
+      return { targetIdx: nextIdx, targetName: props.steps[nextIdx].step_name || `Step ${nextIdx + 1}` }
+    }
+    return { targetIdx: -1, targetName: 'End' }
+  }
+
+  return {
+    trueDest: resolveTarget(trueStepName),
+    falseDest: resolveTarget(falseStepName)
+  }
+}
+
 // Calculate reachable steps
 const reachableSteps = computed(() => {
   const reachable = new Set<number>()
@@ -156,7 +197,16 @@ const reachableSteps = computed(() => {
       continue
     }
 
-    if (hasButtons(step)) {
+    if (isBranch(step)) {
+      // For branch steps, both true and false targets are reachable
+      const { trueDest, falseDest } = getBranchDestinations(step, currentIdx)
+      for (const dest of [trueDest, falseDest]) {
+        if (dest.targetIdx >= 0 && !reachable.has(dest.targetIdx)) {
+          reachable.add(dest.targetIdx)
+          queue.push(dest.targetIdx)
+        }
+      }
+    } else if (hasButtons(step)) {
       // For button steps, only targets of buttons are reachable
       const buttons = getReplyButtons(step)
       buttons.forEach((btn, btnIdx) => {
@@ -167,11 +217,14 @@ const reachableSteps = computed(() => {
         }
       })
     } else {
-      // For non-button steps, next step is reachable
+      // For non-button steps, next step is reachable (unless it's a branch target)
       const nextIdx = currentIdx + 1
       if (nextIdx < props.steps.length && !reachable.has(nextIdx)) {
-        reachable.add(nextIdx)
-        queue.push(nextIdx)
+        const nextStepName = props.steps[nextIdx].step_name
+        if (!isBranchTargetStep(nextStepName)) {
+          reachable.add(nextIdx)
+          queue.push(nextIdx)
+        }
       }
     }
   }
@@ -198,7 +251,13 @@ const isEndReachable = computed(() => {
       return true
     }
 
-    if (hasButtons(step)) {
+    if (isBranch(step)) {
+      // Check if either branch path leads to END
+      const { trueDest, falseDest } = getBranchDestinations(step, stepIdx)
+      if (trueDest.targetIdx === -1 || falseDest.targetIdx === -1) {
+        return true
+      }
+    } else if (hasButtons(step)) {
       // Check if any button leads to END
       const buttons = getReplyButtons(step)
       for (let btnIdx = 0; btnIdx < buttons.length; btnIdx++) {
@@ -208,8 +267,10 @@ const isEndReachable = computed(() => {
         }
       }
     } else {
-      // Non-button step: check if it's the last step (goes to END)
-      if (stepIdx === props.steps.length - 1) {
+      // Non-button step: check if it's the last step or next is a branch target (goes to END)
+      const nextIdx = stepIdx + 1
+      const nextIsBranchTarget = nextIdx < props.steps.length && isBranchTargetStep(props.steps[nextIdx].step_name)
+      if (stepIdx === props.steps.length - 1 || nextIsBranchTarget) {
         return true
       }
     }
@@ -247,7 +308,11 @@ const stepsInLoop = computed(() => {
         return false
       }
 
-      if (hasButtons(step)) {
+      if (isBranch(step)) {
+        const { trueDest, falseDest } = getBranchDestinations(step, currentIdx)
+        if (trueDest.targetIdx >= 0) dfs(trueDest.targetIdx)
+        if (falseDest.targetIdx >= 0) dfs(falseDest.targetIdx)
+      } else if (hasButtons(step)) {
         const buttons = getReplyButtons(step)
         for (let btnIdx = 0; btnIdx < buttons.length; btnIdx++) {
           const dest = getButtonDestination(step, currentIdx, buttons[btnIdx], btnIdx)
@@ -257,7 +322,7 @@ const stepsInLoop = computed(() => {
         }
       } else {
         const nextIdx = currentIdx + 1
-        if (nextIdx < props.steps.length) {
+        if (nextIdx < props.steps.length && !isBranchTargetStep(props.steps[nextIdx].step_name)) {
           dfs(nextIdx)
         }
       }
@@ -315,13 +380,88 @@ function updateConnections() {
       return // Skip drawing connections from transfer steps
     }
 
+    // Branch steps: draw lines from true/false branch nodes
+    if (isBranch(step)) {
+      const { trueDest, falseDest } = getBranchDestinations(step, stepIdx)
+      const branchPaths = [
+        { key: 'true', dest: trueDest, label: 'True', color: '#22c55e' },
+        { key: 'false', dest: falseDest, label: 'False', color: '#ef4444' }
+      ]
+
+      branchPaths.forEach((bp, bpIdx) => {
+        const branchEl = buttonRefs.value.get(`branch-${stepIdx}-${bp.key}`)
+        if (!branchEl) return
+
+        const targetEl = bp.dest.targetIdx >= 0 ? stepRefs.value.get(bp.dest.targetIdx) : endRef.value
+        if (!targetEl) return
+
+        const from = getPos(branchEl)
+        const to = getPos(targetEl)
+        const isJump = bp.dest.targetIdx !== stepIdx + 1
+
+        let path: string
+
+        if (isJump && bp.dest.targetIdx >= 0) {
+          const containerWidth = containerRef.value?.clientWidth || 800
+          const centerX = containerWidth / 2
+          const xOffset = 220 + (bpIdx * 35)
+
+          if (bp.dest.targetIdx > stepIdx) {
+            const rightX = centerX + xOffset
+            path = `M ${from.centerX} ${from.bottom} ` +
+                   `L ${from.centerX} ${from.bottom + 20} ` +
+                   `L ${rightX} ${from.bottom + 20} ` +
+                   `L ${rightX} ${to.centerY} ` +
+                   `L ${to.right + 10} ${to.centerY}`
+          } else {
+            const leftX = centerX - xOffset
+            path = `M ${from.centerX} ${from.bottom} ` +
+                   `L ${from.centerX} ${from.bottom + 20} ` +
+                   `L ${leftX} ${from.bottom + 20} ` +
+                   `L ${leftX} ${to.centerY} ` +
+                   `L ${to.left - 10} ${to.centerY}`
+          }
+
+          const verticalLineX = bp.dest.targetIdx > stepIdx ? centerX + xOffset : centerX - xOffset
+
+          newConnections.push({
+            path,
+            color: bp.color,
+            label: bp.label,
+            labelX: verticalLineX,
+            labelY: (from.bottom + 20 + to.centerY) / 2
+          })
+        } else {
+          const xOff = (bpIdx - 0.5) * 15
+          path = `M ${from.centerX} ${from.bottom} ` +
+                 `L ${from.centerX} ${from.bottom + 15} ` +
+                 `L ${to.centerX + xOff} ${to.top - 15} ` +
+                 `L ${to.centerX + xOff} ${to.top}`
+
+          newConnections.push({
+            path,
+            color: bp.color,
+            label: bp.label,
+            labelX: (from.centerX + to.centerX + xOff) / 2,
+            labelY: (from.bottom + 15 + to.top - 15) / 2
+          })
+        }
+      })
+      return
+    }
+
     if (!hasButtons(step)) {
-      // Non-button step: draw line to next step
+      // Non-button step: draw line to next step (but not into branch targets)
+      const nextStep = props.steps[stepIdx + 1]
+      const nextIsBranchTarget = nextStep && isBranchTargetStep(nextStep.step_name)
+
       const stepEl = stepRefs.value.get(stepIdx)
-      const nextStepEl = stepRefs.value.get(stepIdx + 1)
+      const nextStepEl = nextIsBranchTarget ? null : stepRefs.value.get(stepIdx + 1)
       const endEl = endRef.value
 
-      if (stepEl && (nextStepEl || (stepIdx === props.steps.length - 1 && endEl))) {
+      // If next step is a branch target, draw line to END instead
+      const isLastOrBranchBlocked = stepIdx === props.steps.length - 1 || nextIsBranchTarget
+      if (stepEl && (nextStepEl || (isLastOrBranchBlocked && endEl))) {
         const targetEl = nextStepEl || endEl
         if (targetEl) {
           const from = getPos(stepEl)
@@ -543,12 +683,22 @@ onUnmounted(() => {
           >
             <path d="M 0 0 L 12 5 L 0 10 L 3 5 Z" fill="#22c55e" />
           </marker>
+          <marker
+            id="arrow-red"
+            markerWidth="12"
+            markerHeight="10"
+            refX="10"
+            refY="5"
+            orient="auto"
+          >
+            <path d="M 0 0 L 12 5 L 0 10 L 3 5 Z" fill="#ef4444" />
+          </marker>
         </defs>
 
         <g v-for="(conn, idx) in connections" :key="idx">
-          <!-- Shadow for better visibility (only for colored jump lines, not gray or green) -->
+          <!-- Shadow for better visibility (only for colored jump lines, not gray, green, or red) -->
           <path
-            v-if="conn.color !== '#9ca3af' && conn.color !== '#22c55e'"
+            v-if="conn.color !== '#9ca3af' && conn.color !== '#22c55e' && conn.color !== '#ef4444'"
             :d="conn.path"
             fill="none"
             stroke="white"
@@ -563,7 +713,7 @@ onUnmounted(() => {
             :stroke-width="conn.color === '#9ca3af' ? 2 : 3"
             stroke-linecap="round"
             stroke-linejoin="round"
-            :marker-end="conn.color === '#22c55e' ? 'url(#arrow-green)' : conn.color === '#9ca3af' ? 'url(#arrow-gray)' : `url(#arrow-${lineColors.indexOf(conn.color)})`"
+            :marker-end="conn.color === '#22c55e' ? 'url(#arrow-green)' : conn.color === '#ef4444' ? 'url(#arrow-red)' : conn.color === '#9ca3af' ? 'url(#arrow-gray)' : `url(#arrow-${lineColors.indexOf(conn.color)})`"
           />
           <!-- Label for jump connections - positioned ON the line with solid background -->
           <g v-if="conn.label">
@@ -666,11 +816,56 @@ onUnmounted(() => {
             <div class="p-3">
               <p class="text-xs text-muted-foreground line-clamp-2">{{ step.message || 'No message' }}</p>
             </div>
+            <!-- Branch indicator -->
+            <div v-if="isBranch(step)" class="px-3 pb-3">
+              <div class="text-[10px] text-muted-foreground flex items-center gap-1">
+                <GitMerge class="h-3 w-3" />
+                <span>Branch on: {{ step.conditional_next ? 'configured' : 'not configured' }}</span>
+              </div>
+            </div>
             <!-- Buttons indicator -->
             <div v-if="hasButtons(step)" class="px-3 pb-3">
               <div class="text-[10px] text-muted-foreground flex items-center gap-1">
                 <GitBranch class="h-3 w-3" />
                 <span>{{ getReplyButtons(step).length }} button{{ getReplyButtons(step).length > 1 ? 's' : '' }} - routes to specific steps</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Branch nodes (shown below step if branch) -->
+          <div v-if="isBranch(step)" class="flex gap-3 mb-8 justify-center">
+            <div
+              :ref="(el) => { if (el) buttonRefs.set(`branch-${idx}-true`, el as HTMLElement) }"
+              :class="[
+                'px-4 py-2.5 rounded-xl border-2 text-sm font-medium shadow-md cursor-pointer transition-all min-w-[120px]',
+                getBranchDestinations(step, idx).trueDest.targetIdx !== idx + 1
+                  ? 'bg-green-50 dark:bg-green-900/30 border-green-400 text-green-700 dark:text-green-300 hover:bg-green-100'
+                  : 'bg-white dark:bg-gray-800 border-green-300 dark:border-green-600 text-green-700 dark:text-green-300 hover:bg-green-50'
+              ]"
+              @click.stop="emit('selectStep', idx)"
+            >
+              <div class="text-center">
+                <div class="font-semibold">True</div>
+                <div class="text-[10px] mt-1 text-green-500">
+                  → {{ getBranchDestinations(step, idx).trueDest.targetName }}
+                </div>
+              </div>
+            </div>
+            <div
+              :ref="(el) => { if (el) buttonRefs.set(`branch-${idx}-false`, el as HTMLElement) }"
+              :class="[
+                'px-4 py-2.5 rounded-xl border-2 text-sm font-medium shadow-md cursor-pointer transition-all min-w-[120px]',
+                getBranchDestinations(step, idx).falseDest.targetIdx !== idx + 1
+                  ? 'bg-red-50 dark:bg-red-900/30 border-red-400 text-red-700 dark:text-red-300 hover:bg-red-100'
+                  : 'bg-white dark:bg-gray-800 border-red-300 dark:border-red-600 text-red-700 dark:text-red-300 hover:bg-red-50'
+              ]"
+              @click.stop="emit('selectStep', idx)"
+            >
+              <div class="text-center">
+                <div class="font-semibold">False</div>
+                <div class="text-[10px] mt-1 text-red-500">
+                  → {{ getBranchDestinations(step, idx).falseDest.targetName }}
+                </div>
               </div>
             </div>
           </div>
@@ -698,8 +893,8 @@ onUnmounted(() => {
             </div>
           </div>
 
-          <!-- Spacer for non-button steps -->
-          <div v-else class="h-8"></div>
+          <!-- Spacer for non-button, non-branch steps -->
+          <div v-else-if="!isBranch(step)" class="h-8"></div>
         </template>
 
         <!-- End Node -->
