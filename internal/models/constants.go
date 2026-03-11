@@ -87,6 +87,7 @@ const (
 	FlowStepTypeButtons      FlowStepType = "buttons"
 	FlowStepTypeTransfer     FlowStepType = "transfer"
 	FlowStepTypeWhatsAppFlow FlowStepType = "whatsapp_flow"
+	FlowStepTypeBranch       FlowStepType = "branch"
 )
 
 // SessionStatus represents chatbot session states
