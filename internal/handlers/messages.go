@@ -47,8 +47,9 @@ type OutgoingMessageRequest struct {
 	URL             string            // For CTA URL button
 
 	// Template messages
-	Template   *models.Template
-	BodyParams map[string]string // Parameter name -> value (supports both named and positional)
+	Template      *models.Template
+	BodyParams    map[string]string // Parameter name -> value (supports both named and positional)
+	HeaderMediaID string            // WhatsApp media ID for dynamic template header image/video/document
 
 	// WhatsApp Flow messages
 	FlowID          string // Meta Flow ID
@@ -181,6 +182,20 @@ func (a *App) SendOutgoingMessage(ctx context.Context, req OutgoingMessageReques
 				return "", fmt.Errorf("template is required for template messages")
 			}
 			components := whatsapp.BodyParamsToComponents(req.BodyParams)
+
+			// Add header component for media templates (IMAGE, VIDEO, DOCUMENT)
+			// Use explicit HeaderMediaID from request, or fall back to template's stored media ID
+			headerMediaID := req.HeaderMediaID
+			if headerMediaID == "" {
+				headerMediaID = req.Template.HeaderMediaID
+			}
+			if headerMediaID != "" && req.Template.HeaderType != "" && req.Template.HeaderType != "TEXT" {
+				headerComponent := buildTemplateHeaderComponent(req.Template.HeaderType, headerMediaID)
+				if headerComponent != nil {
+					components = append([]map[string]interface{}{headerComponent}, components...)
+				}
+			}
+
 			return a.WhatsApp.SendTemplateMessage(sendCtx, waAccount, req.Contact.PhoneNumber, req.Template.Name, req.Template.Language, components)
 
 		case models.MessageTypeFlow:
@@ -683,5 +698,31 @@ func (a *App) SendTemplateMessage(r *fastglue.Request) error {
 		UpdatedAt:       message.UpdatedAt,
 	}
 	return r.SendEnvelope(response)
+}
+
+// buildTemplateHeaderComponent creates a header component for media templates (IMAGE, VIDEO, DOCUMENT).
+func buildTemplateHeaderComponent(headerType, headerContent string) map[string]interface{} {
+	var mediaType string
+	switch headerType {
+	case "IMAGE":
+		mediaType = "image"
+	case "VIDEO":
+		mediaType = "video"
+	case "DOCUMENT":
+		mediaType = "document"
+	default:
+		return nil
+	}
+	return map[string]interface{}{
+		"type": "header",
+		"parameters": []map[string]interface{}{
+			{
+				"type": mediaType,
+				mediaType: map[string]interface{}{
+					"id": headerContent,
+				},
+			},
+		},
+	}
 }
 
