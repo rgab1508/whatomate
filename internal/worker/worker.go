@@ -246,9 +246,18 @@ func (w *Worker) sendTemplateMessage(ctx context.Context, account *models.WhatsA
 
 	// Handle header component (for media templates)
 	if template.HeaderType != "" && template.HeaderType != "TEXT" {
-		// Use campaign's uploaded media ID if available
+		// Use campaign's uploaded media ID if available, then template's stored media ID, then URL fallback
 		if campaignHeaderMediaID != "" {
 			headerParam := buildMediaParameter(template.HeaderType, "id", campaignHeaderMediaID)
+			if headerParam != nil {
+				components = append(components, map[string]interface{}{
+					"type":       "header",
+					"parameters": []map[string]interface{}{headerParam},
+				})
+			}
+		} else if template.HeaderMediaID != "" {
+			// Fall back to template's stored media ID
+			headerParam := buildMediaParameter(template.HeaderType, "id", template.HeaderMediaID)
 			if headerParam != nil {
 				components = append(components, map[string]interface{}{
 					"type":       "header",

@@ -116,6 +116,9 @@ function getButtonDestination(step: FlowStep, stepIdx: number, btn: ButtonConfig
   const targetStepName = step.conditional_next?.[buttonId]
 
   if (targetStepName) {
+    if (targetStepName === '__end__') {
+      return { targetIdx: -1, targetName: 'End' }
+    }
     const targetIdx = props.steps.findIndex(s => s.step_name === targetStepName)
     if (targetIdx !== -1) {
       return { targetIdx, targetName: targetStepName }
@@ -162,6 +165,7 @@ function getBranchDestinations(step: FlowStep, stepIdx: number): { trueDest: { t
 
   const resolveTarget = (name: string | undefined) => {
     if (name) {
+      if (name === '__end__') return { targetIdx: -1, targetName: 'End' }
       const idx = props.steps.findIndex(s => s.step_name === name)
       if (idx !== -1) return { targetIdx: idx, targetName: name }
     }
@@ -217,15 +221,26 @@ const reachableSteps = computed(() => {
         }
       })
     } else {
-      // For non-button steps, next step is reachable (unless it's a branch target)
-      const nextIdx = currentIdx + 1
-      if (nextIdx < props.steps.length && !reachable.has(nextIdx)) {
-        const nextStepName = props.steps[nextIdx].step_name
-        if (!isBranchTargetStep(nextStepName)) {
-          reachable.add(nextIdx)
-          queue.push(nextIdx)
+      // For non-button steps, follow explicit next_step or sequential fallback
+      const step = props.steps[currentIdx]
+      if (step.next_step && step.next_step !== '__end__') {
+        const targetIdx = props.steps.findIndex(s => s.step_name === step.next_step)
+        if (targetIdx >= 0 && !reachable.has(targetIdx)) {
+          reachable.add(targetIdx)
+          queue.push(targetIdx)
+        }
+      } else if (!step.next_step) {
+        // Sequential fallback (unless it's a branch target)
+        const nextIdx = currentIdx + 1
+        if (nextIdx < props.steps.length && !reachable.has(nextIdx)) {
+          const nextStepName = props.steps[nextIdx].step_name
+          if (!isBranchTargetStep(nextStepName)) {
+            reachable.add(nextIdx)
+            queue.push(nextIdx)
+          }
         }
       }
+      // If next_step === '__end__', no further steps are reachable from here
     }
   }
 
@@ -267,7 +282,10 @@ const isEndReachable = computed(() => {
         }
       }
     } else {
-      // Non-button step: check if it's the last step or next is a branch target (goes to END)
+      // Non-button step: check explicit __end__, last step, or branch-blocked
+      if (step.next_step === '__end__') {
+        return true
+      }
       const nextIdx = stepIdx + 1
       const nextIsBranchTarget = nextIdx < props.steps.length && isBranchTargetStep(props.steps[nextIdx].step_name)
       if (stepIdx === props.steps.length - 1 || nextIsBranchTarget) {
@@ -375,9 +393,9 @@ function updateConnections() {
   }
 
   props.steps.forEach((step, stepIdx) => {
-    // Transfer steps end the flow - no connection to next step
-    if (step.message_type === 'transfer') {
-      return // Skip drawing connections from transfer steps
+    // Transfer steps end the flow unless they have an explicit next_step
+    if (step.message_type === 'transfer' && !step.next_step) {
+      return // Skip drawing connections from transfer steps without explicit routing
     }
 
     // Branch steps: draw lines from true/false branch nodes
@@ -451,23 +469,90 @@ function updateConnections() {
     }
 
     if (!hasButtons(step)) {
-      // Non-button step: draw line to next step (but not into branch targets)
-      const nextStep = props.steps[stepIdx + 1]
-      const nextIsBranchTarget = nextStep && isBranchTargetStep(nextStep.step_name)
-
+      // Non-button step: check for explicit next_step jump or sequential flow
       const stepEl = stepRefs.value.get(stepIdx)
-      const nextStepEl = nextIsBranchTarget ? null : stepRefs.value.get(stepIdx + 1)
-      const endEl = endRef.value
+      if (!stepEl) return
 
-      // If next step is a branch target, draw line to END instead
-      const isLastOrBranchBlocked = stepIdx === props.steps.length - 1 || nextIsBranchTarget
-      if (stepEl && (nextStepEl || (isLastOrBranchBlocked && endEl))) {
-        const targetEl = nextStepEl || endEl
-        if (targetEl) {
-          const from = getPos(stepEl)
-          const to = getPos(targetEl)
+      // Determine target: explicit next_step or next sequential step
+      let targetIdx = -1
+      let isExplicitJump = false
+      let isExplicitEnd = false
 
-          // Simple straight line down
+      if (step.next_step) {
+        if (step.next_step === '__end__') {
+          // Explicit end flow
+          isExplicitEnd = true
+          isExplicitJump = true
+        } else {
+          // Explicit "go to" target
+          const idx = props.steps.findIndex(s => s.step_name === step.next_step)
+          if (idx >= 0) {
+            targetIdx = idx
+            isExplicitJump = targetIdx !== stepIdx + 1
+          }
+        }
+      }
+
+      if (targetIdx < 0 && !step.next_step) {
+        // Sequential fallback (but not into branch targets)
+        const nextStep = props.steps[stepIdx + 1]
+        const nextIsBranchTarget = nextStep && isBranchTargetStep(nextStep.step_name)
+        if (!nextIsBranchTarget && stepIdx + 1 < props.steps.length) {
+          targetIdx = stepIdx + 1
+        }
+      }
+
+      const targetEl = targetIdx >= 0 ? stepRefs.value.get(targetIdx) : endRef.value
+
+      if (stepEl && targetEl) {
+        const from = getPos(stepEl)
+        const to = getPos(targetEl)
+
+        if (isExplicitEnd) {
+          // Explicit end flow - draw a direct line to END node
+          const color = '#3b82f6'
+          const path = `M ${from.centerX} ${from.bottom} L ${from.centerX} ${from.bottom + 20} L ${to.centerX} ${to.top - 20} L ${to.centerX} ${to.top}`
+          newConnections.push({
+            path,
+            color,
+            label: 'End',
+            labelX: (from.centerX + to.centerX) / 2,
+            labelY: (from.bottom + 20 + to.top - 20) / 2
+          })
+        } else if (isExplicitJump) {
+          // Draw a jump line (similar to button jumps)
+          const containerWidth = containerRef.value?.clientWidth || 800
+          const centerX = containerWidth / 2
+          const xOffset = 220
+          const color = '#3b82f6' // blue for go-to jumps
+          let path: string
+
+          if (targetIdx > stepIdx) {
+            const rightX = centerX + xOffset
+            path = `M ${from.centerX} ${from.bottom} ` +
+                   `L ${from.centerX} ${from.bottom + 20} ` +
+                   `L ${rightX} ${from.bottom + 20} ` +
+                   `L ${rightX} ${to.centerY} ` +
+                   `L ${to.right + 10} ${to.centerY}`
+          } else {
+            const leftX = centerX - xOffset
+            path = `M ${from.centerX} ${from.bottom} ` +
+                   `L ${from.centerX} ${from.bottom + 20} ` +
+                   `L ${leftX} ${from.bottom + 20} ` +
+                   `L ${leftX} ${to.centerY} ` +
+                   `L ${to.left - 10} ${to.centerY}`
+          }
+
+          const verticalLineX = targetIdx > stepIdx ? centerX + xOffset : centerX - xOffset
+          newConnections.push({
+            path,
+            color,
+            label: step.next_step,
+            labelX: verticalLineX,
+            labelY: (from.bottom + 20 + to.centerY) / 2
+          })
+        } else {
+          // Simple straight line down (sequential or to END)
           newConnections.push({
             path: `M ${from.centerX} ${from.bottom} L ${from.centerX} ${from.bottom + 20} L ${to.centerX} ${to.top - 20} L ${to.centerX} ${to.top}`,
             color: '#9ca3af',
@@ -503,7 +588,22 @@ function updateConnections() {
         let path: string
         const color = lineColors[colorIdx % lineColors.length]
 
-        if (isJump && dest.targetIdx >= 0) {
+        if (isJump && dest.targetIdx === -1) {
+          // Explicit end flow - draw colored line to END node
+          colorIdx++
+          const path = `M ${from.centerX} ${from.bottom} ` +
+                 `L ${from.centerX} ${from.bottom + 15} ` +
+                 `L ${to.centerX} ${to.top - 15} ` +
+                 `L ${to.centerX} ${to.top}`
+
+          newConnections.push({
+            path,
+            color,
+            label: btn.title ? `${btn.title} → End` : 'End',
+            labelX: (from.centerX + to.centerX) / 2,
+            labelY: (from.bottom + 15 + to.top - 15) / 2
+          })
+        } else if (isJump && dest.targetIdx >= 0) {
           // Track this target for Y offset
           if (!targetCounts[dest.targetIdx]) targetCounts[dest.targetIdx] = 0
           const targetCount = targetCounts[dest.targetIdx]

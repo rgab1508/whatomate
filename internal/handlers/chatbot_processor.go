@@ -900,6 +900,46 @@ func (a *App) processFlowResponse(account *models.WhatsAppAccount, session *mode
 		}
 	}
 
+	// Validate location input - ensure user actually sent a location message
+	if currentStep.InputType == models.InputTypeLocation {
+		var locationData map[string]interface{}
+		if err := json.Unmarshal([]byte(userInput), &locationData); err != nil || locationData["latitude"] == nil || locationData["longitude"] == nil {
+			// Not a valid location message
+			session.StepRetries++
+			if currentStep.RetryOnInvalid && session.StepRetries < currentStep.MaxRetries {
+				a.DB.Model(session).Update("step_retries", session.StepRetries)
+				errorMsg := currentStep.ValidationError
+				if errorMsg == "" {
+					errorMsg = "Please share your location using the attachment button → Location."
+				}
+				errorMsg = processTemplate(errorMsg, a.buildMessageContext(account, session, contact))
+				if err := a.sendAndSaveTextMessage(account, contact, errorMsg); err != nil {
+					a.Log.Error("Failed to send location validation error", "error", err, "contact", contact.PhoneNumber)
+				}
+				a.logSessionMessage(session.ID, models.DirectionOutgoing, errorMsg, currentStep.StepName+"_retry")
+				return
+			}
+			a.Log.Warn("Max retries exceeded for location input", "step", currentStep.StepName)
+		} else if currentStep.StoreAs != "" {
+			// Store location as a nested map so {{location.latitude}} works via dot notation
+			sessionData := session.SessionData
+			if sessionData == nil {
+				sessionData = models.JSONB{}
+			}
+			sessionData[currentStep.StoreAs] = locationData
+			sessionData[currentStep.StoreAs+"_lat"] = locationData["latitude"]
+			sessionData[currentStep.StoreAs+"_lng"] = locationData["longitude"]
+			if name, ok := locationData["name"].(string); ok && name != "" {
+				sessionData[currentStep.StoreAs+"_name"] = name
+			}
+			if address, ok := locationData["address"].(string); ok && address != "" {
+				sessionData[currentStep.StoreAs+"_address"] = address
+			}
+			a.DB.Model(session).Update("session_data", sessionData)
+			session.SessionData = sessionData
+		}
+	}
+
 	// Auto-validate button responses when step has buttons configured
 	// Only validate if the step actually has Buttons (i.e., it sent interactive buttons to the user)
 	if len(currentStep.Buttons) > 0 &&
@@ -942,7 +982,8 @@ func (a *App) processFlowResponse(account *models.WhatsAppAccount, session *mode
 	}
 
 	// Store the user's response (use buttonID if available, otherwise userInput)
-	if currentStep.StoreAs != "" {
+	// Skip for location inputs - already stored with parsed lat/lng fields above
+	if currentStep.StoreAs != "" && currentStep.InputType != models.InputTypeLocation {
 		sessionData := session.SessionData
 		if sessionData == nil {
 			sessionData = models.JSONB{}
@@ -978,6 +1019,10 @@ func (a *App) processFlowResponse(account *models.WhatsAppAccount, session *mode
 
 	// Determine next step
 	nextStepName := currentStep.NextStep
+	if nextStepName == "__end__" {
+		a.completeFlow(account, session, contact, flow)
+		return
+	}
 	if nextStepName == "" && currentStepIndex+1 < len(flow.Steps) {
 		candidateName := flow.Steps[currentStepIndex+1].StepName
 		// Don't fall through sequentially into a branch target step
@@ -1008,7 +1053,7 @@ func (a *App) processFlowResponse(account *models.WhatsAppAccount, session *mode
 	}
 
 	// Move to next step or complete flow
-	if nextStepName == "" {
+	if nextStepName == "" || nextStepName == "__end__" {
 		a.completeFlow(account, session, contact, flow)
 		return
 	}
@@ -1307,6 +1352,10 @@ func (a *App) sendStepWithSkipCheck(account *models.WhatsAppAccount, session *mo
 
 		// Find next step
 		nextStepName := step.NextStep
+		if nextStepName == "__end__" {
+			a.completeFlow(account, session, contact, flow)
+			return
+		}
 		if nextStepName == "" {
 			// Find by step order (don't fall through into branch targets)
 			for i, s := range flow.Steps {
@@ -1364,6 +1413,10 @@ func (a *App) sendStepWithSkipCheck(account *models.WhatsAppAccount, session *mo
 
 		// Find next step
 		nextStepName := step.NextStep
+		if nextStepName == "__end__" {
+			a.completeFlow(account, session, contact, flow)
+			return
+		}
 		if nextStepName == "" {
 			// Find by step order (don't fall through into branch targets)
 			for i, s := range flow.Steps {
@@ -2525,7 +2578,7 @@ func (a *App) processBranchStep(account *models.WhatsAppAccount, session *models
 		}
 	}
 
-	if nextStepName == "" {
+	if nextStepName == "" || nextStepName == "__end__" {
 		a.completeFlow(account, session, contact, flow)
 		return
 	}
