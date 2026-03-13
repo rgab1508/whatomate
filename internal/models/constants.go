@@ -195,6 +195,14 @@ const (
 	SSOProviderCustom    SSOProviderType = "custom"
 )
 
+// TriggerType represents chatbot flow trigger types
+type TriggerType string
+
+const (
+	TriggerTypeKeywords TriggerType = "keywords"
+	TriggerTypeWebhook  TriggerType = "webhook"
+)
+
 // WebhookEvent represents webhook event types
 type WebhookEvent string
 

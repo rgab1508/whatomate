@@ -291,6 +291,7 @@ type WhatsAppAccount struct {
 	Name               string    `gorm:"size:100;uniqueIndex:idx_wa_org_name;not null" json:"name"` // Unique per org, used as reference
 	AppID              string    `gorm:"size:100" json:"app_id"`                                    // Meta App ID
 	PhoneID            string    `gorm:"size:100;not null" json:"phone_id"`
+	PhoneNumber        string    `gorm:"size:20" json:"phone_number"`
 	BusinessID         string    `gorm:"size:100;not null" json:"business_id"`
 	AccessToken        string    `gorm:"type:text;not null" json:"-"` // encrypted
 	AppSecret          string    `gorm:"size:255" json:"-"`           // Meta App Secret for webhook signature verification

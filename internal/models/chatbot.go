@@ -148,6 +148,8 @@ type ChatbotFlow struct {
 	Description        string      `gorm:"type:text" json:"description"`
 	TriggerKeywords    StringArray `gorm:"type:jsonb" json:"trigger_keywords"`
 	TriggerButtonID    string      `gorm:"size:100" json:"trigger_button_id"`
+	TriggerType        TriggerType `gorm:"size:20;default:'keywords'" json:"trigger_type"`
+	WebhookToken       *string     `gorm:"size:64;uniqueIndex" json:"webhook_token,omitempty"`
 	InitialMessage     string       `gorm:"type:text" json:"initial_message"`
 	InitialMessageType FlowStepType `gorm:"size:20;default:'text'" json:"initial_message_type"`
 	InitialTemplateID  *uuid.UUID  `gorm:"type:uuid" json:"initial_template_id,omitempty"`

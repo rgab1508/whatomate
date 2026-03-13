@@ -106,8 +106,13 @@ func (w *Worker) HandleRecipientJob(ctx context.Context, job *queue.RecipientJob
 		TemplateParams: job.TemplateParams,
 	}
 
-	// Send template message
-	waMessageID, err := w.sendTemplateMessage(ctx, &account, campaign.Template, recipient, campaign.HeaderMediaID)
+	// Send template message (use MM Lite API if enabled)
+	var waMessageID string
+	if campaign.UseMMAPI {
+		waMessageID, err = w.sendMarketingTemplateMessage(ctx, &account, campaign.Template, recipient, campaign.HeaderMediaID)
+	} else {
+		waMessageID, err = w.sendTemplateMessage(ctx, &account, campaign.Template, recipient, campaign.HeaderMediaID)
+	}
 
 	// Create Message record
 	message := models.Message{
@@ -293,6 +298,59 @@ func (w *Worker) sendTemplateMessage(ctx context.Context, account *models.WhatsA
 	}
 
 	return w.WhatsApp.SendTemplateMessage(ctx, waAccount, recipient.PhoneNumber, template.Name, template.Language, components)
+}
+
+// sendMarketingTemplateMessage sends a template message via the Marketing Messages API (MM Lite).
+// Uses the same component building logic as sendTemplateMessage but routes to the /marketing_messages endpoint.
+func (w *Worker) sendMarketingTemplateMessage(ctx context.Context, account *models.WhatsAppAccount, template *models.Template, recipient *models.BulkMessageRecipient, campaignHeaderMediaID string) (string, error) {
+	waAccount := account.ToWAAccount()
+
+	var components []map[string]interface{}
+
+	if template.HeaderType != "" && template.HeaderType != "TEXT" {
+		if campaignHeaderMediaID != "" {
+			headerParam := buildMediaParameter(template.HeaderType, "id", campaignHeaderMediaID)
+			if headerParam != nil {
+				components = append(components, map[string]interface{}{
+					"type":       "header",
+					"parameters": []map[string]interface{}{headerParam},
+				})
+			}
+		} else if template.HeaderMediaID != "" {
+			headerParam := buildMediaParameter(template.HeaderType, "id", template.HeaderMediaID)
+			if headerParam != nil {
+				components = append(components, map[string]interface{}{
+					"type":       "header",
+					"parameters": []map[string]interface{}{headerParam},
+				})
+			}
+		} else if template.HeaderContent != "" {
+			headerParam := buildMediaParameter(template.HeaderType, "link", template.HeaderContent)
+			if headerParam != nil {
+				components = append(components, map[string]interface{}{
+					"type":       "header",
+					"parameters": []map[string]interface{}{headerParam},
+				})
+			}
+		}
+	}
+
+	resolvedParams := templateutil.ResolveParams(template.BodyContent, recipient.TemplateParams)
+	if len(resolvedParams) > 0 {
+		bodyParams := make([]map[string]interface{}, len(resolvedParams))
+		for i, val := range resolvedParams {
+			bodyParams[i] = map[string]interface{}{
+				"type": "text",
+				"text": val,
+			}
+		}
+		components = append(components, map[string]interface{}{
+			"type":       "body",
+			"parameters": bodyParams,
+		})
+	}
+
+	return w.WhatsApp.SendMarketingTemplateMessage(ctx, waAccount, recipient.PhoneNumber, template.Name, template.Language, components)
 }
 
 // buildMediaParameter creates a media parameter for WhatsApp template headers.

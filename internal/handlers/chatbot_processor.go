@@ -732,7 +732,8 @@ func (a *App) getOrCreateSession(orgID, contactID uuid.UUID, accountName, phoneN
 	var session models.ChatbotSession
 	timeout := now.Add(-time.Duration(timeoutMins) * time.Minute)
 	result := a.DB.Where("organization_id = ? AND contact_id = ? AND whats_app_account = ? AND status = ? AND last_activity_at > ?",
-		orgID, contactID, accountName, models.SessionStatusActive, timeout).First(&session)
+		orgID, contactID, accountName, models.SessionStatusActive, timeout).
+		Order("started_at DESC").First(&session)
 
 	if result.Error == nil {
 		// Update last activity
@@ -756,6 +757,31 @@ func (a *App) getOrCreateSession(orgID, contactID uuid.UUID, accountName, phoneN
 		a.Log.Error("Failed to create session", "error", err)
 	}
 	return &session, true // new session
+}
+
+// createWebhookSession creates a new session for webhook-triggered flows.
+// It always creates a fresh session (never reuses existing ones) to support parallel flows.
+func (a *App) createWebhookSession(orgID, contactID uuid.UUID, accountName, phoneNumber string, data map[string]interface{}) *models.ChatbotSession {
+	now := time.Now()
+	sessionData := models.JSONB{}
+	if data != nil {
+		sessionData = models.JSONB(data)
+	}
+	session := models.ChatbotSession{
+		BaseModel:       models.BaseModel{ID: uuid.New()},
+		OrganizationID:  orgID,
+		ContactID:       contactID,
+		WhatsAppAccount: accountName,
+		PhoneNumber:     phoneNumber,
+		Status:          models.SessionStatusActive,
+		SessionData:     sessionData,
+		StartedAt:       now,
+		LastActivityAt:  now,
+	}
+	if err := a.DB.Create(&session).Error; err != nil {
+		a.Log.Error("Failed to create webhook session", "error", err)
+	}
+	return &session
 }
 
 // logSessionMessage logs a message to the chatbot session
@@ -784,6 +810,10 @@ func (a *App) matchFlowTrigger(orgID uuid.UUID, accountName, messageText string)
 	messageLower := strings.ToLower(messageText)
 
 	for _, flow := range flows {
+		// Skip webhook-triggered flows from keyword matching
+		if flow.TriggerType == models.TriggerTypeWebhook {
+			continue
+		}
 		for _, keyword := range flow.TriggerKeywords {
 			if strings.Contains(messageLower, strings.ToLower(keyword)) {
 				return &flow
@@ -802,14 +832,15 @@ func (a *App) startFlow(account *models.WhatsAppAccount, session *models.Chatbot
 		a.Log.Info("Flow step", "index", i, "step_name", step.StepName, "step_order", step.StepOrder, "message_type", step.MessageType)
 	}
 
-	// Update session with flow info
+	// Update session with flow info, preserving existing session data (e.g. webhook payload)
 	session.CurrentFlowID = &flow.ID
 	session.CurrentStep = ""
 	session.StepRetries = 0
-	session.SessionData = models.JSONB{
-		"_flow_id":   flow.ID.String(),
-		"_flow_name": flow.Name,
+	if session.SessionData == nil {
+		session.SessionData = models.JSONB{}
 	}
+	session.SessionData["_flow_id"] = flow.ID.String()
+	session.SessionData["_flow_name"] = flow.Name
 	a.DB.Save(session)
 
 	// Send initial message if configured

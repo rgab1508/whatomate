@@ -13,6 +13,7 @@ type BulkMessageCampaign struct {
 	WhatsAppAccount string     `gorm:"size:100;index;not null" json:"whatsapp_account"` // References WhatsAppAccount.Name
 	Name            string     `gorm:"size:255;not null" json:"name"`
 	TemplateID      uuid.UUID  `gorm:"type:uuid;not null" json:"template_id"`
+	UseMMAPI             bool           `gorm:"default:false" json:"use_mm_api"`           // Use Marketing Messages API (MM Lite)
 	HeaderMediaID        string         `gorm:"type:text" json:"header_media_id"`         // Meta media ID (from uploaded media)
 	HeaderMediaFilename  string         `gorm:"type:text" json:"header_media_filename"`   // Original filename
 	HeaderMediaMimeType  string         `gorm:"type:text" json:"header_media_mime_type"`  // MIME type (image/jpeg, video/mp4, etc.)

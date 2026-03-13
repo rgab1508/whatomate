@@ -23,6 +23,12 @@ This fork adds the following features on top of upstream Whatomate:
 - **Dynamic Template Header Media ID**
   Support for passing media IDs in template message headers, enabling dynamic media content in WhatsApp templates.
 
+- **Webhook Event Trigger for Flows**
+  Trigger chatbot flows from external systems (e-commerce, CRM, payment gateways) via `POST /api/webhook-trigger/{token}`. Supports parallel sessions, auto-contact creation, and variable injection from the webhook payload into flow messages using `{{variable}}` syntax.
+
+- **Marketing Messages API (MM Lite)**
+  Support for Meta's Marketing Messages API endpoint (`/marketing_messages`) for optimized marketing template delivery. Available for both bulk campaigns (toggle in campaign settings) and individual template messages via the API.
+
 ![Dashboard](docs/public/images/dashboard-light.png#gh-light-mode-only)
 ![Dashboard](docs/public/images/dashboard-dark.png#gh-dark-mode-only)
 

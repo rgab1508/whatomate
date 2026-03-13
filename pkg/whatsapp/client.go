@@ -206,6 +206,11 @@ func (c *Client) buildMessagesURL(account *Account) string {
 	return fmt.Sprintf("%s/%s/%s/messages", c.getBaseURL(), account.APIVersion, account.PhoneID)
 }
 
+// buildMarketingMessagesURL builds the marketing_messages endpoint URL (MM Lite API)
+func (c *Client) buildMarketingMessagesURL(account *Account) string {
+	return fmt.Sprintf("%s/%s/%s/marketing_messages", c.getBaseURL(), account.APIVersion, account.PhoneID)
+}
+
 // buildTemplatesURL builds the message_templates endpoint URL
 func (c *Client) buildTemplatesURL(account *Account) string {
 	return fmt.Sprintf("%s/%s/%s/message_templates", c.getBaseURL(), account.APIVersion, account.BusinessID)

@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
 import { Textarea } from '@/components/ui/textarea'
 import { Progress } from '@/components/ui/progress'
@@ -84,6 +85,7 @@ interface Campaign {
   header_media_id?: string
   header_media_filename?: string
   header_media_mime_type?: string
+  use_mm_api?: boolean
   status: 'draft' | 'scheduled' | 'running' | 'paused' | 'completed' | 'failed' | 'queued' | 'processing' | 'cancelled'
   total_recipients: number
   sent_count: number
@@ -372,7 +374,8 @@ const manualInputValidation = computed((): ManualInputValidation => {
 const newCampaign = ref({
   name: '',
   whatsapp_account: '',
-  template_id: ''
+  template_id: '',
+  use_mm_api: false
 })
 
 // AlertDialog state
@@ -514,7 +517,8 @@ async function createCampaign() {
     await campaignsService.create({
       name: newCampaign.value.name,
       whatsapp_account: newCampaign.value.whatsapp_account,
-      template_id: newCampaign.value.template_id
+      template_id: newCampaign.value.template_id,
+      use_mm_api: newCampaign.value.use_mm_api
     })
     toast.success(t('common.createdSuccess', { resource: t('resources.Campaign') }))
     showCreateDialog.value = false
@@ -531,7 +535,8 @@ function resetForm() {
   newCampaign.value = {
     name: '',
     whatsapp_account: '',
-    template_id: ''
+    template_id: '',
+    use_mm_api: false
   }
 }
 
@@ -540,7 +545,8 @@ function openEditDialog(campaign: Campaign) {
   newCampaign.value = {
     name: campaign.name,
     whatsapp_account: campaign.whatsapp_account || '',
-    template_id: campaign.template_id || ''
+    template_id: campaign.template_id || '',
+    use_mm_api: campaign.use_mm_api || false
   }
   showCreateDialog.value = true
 }
@@ -564,7 +570,8 @@ async function saveCampaign() {
       await campaignsService.update(editingCampaignId.value, {
         name: newCampaign.value.name,
         whatsapp_account: newCampaign.value.whatsapp_account,
-        template_id: newCampaign.value.template_id
+        template_id: newCampaign.value.template_id,
+        use_mm_api: newCampaign.value.use_mm_api
       })
       toast.success(t('common.updatedSuccess', { resource: t('resources.Campaign') }))
       showCreateDialog.value = false
@@ -1210,6 +1217,20 @@ async function addRecipientsFromCSV() {
                   {{ $t('campaigns.noTemplatesFound') }}
                 </p>
               </div>
+              <div class="flex items-center gap-2">
+                <Checkbox
+                  id="use_mm_api"
+                  :checked="newCampaign.use_mm_api"
+                  @update:checked="(val: boolean | 'indeterminate') => newCampaign.use_mm_api = val === true"
+                  :disabled="isCreating"
+                />
+                <Label for="use_mm_api" class="text-sm font-normal cursor-pointer">
+                  Use Marketing Messages API (MM Lite)
+                </Label>
+              </div>
+              <p class="text-xs text-muted-foreground -mt-2">
+                Optimized delivery for marketing templates with better deliverability
+              </p>
             </div>
             <DialogFooter>
               <Button variant="outline" size="sm" @click="showCreateDialog = false; editingCampaignId = null" :disabled="isCreating">

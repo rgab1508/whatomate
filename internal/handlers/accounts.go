@@ -353,6 +353,12 @@ func (a *App) TestAccountConnection(r *fastglue.Request) error {
 	accountMode, _ := result["account_mode"].(string)
 	isTestNumber := accountMode == "SANDBOX"
 
+	// Auto-save phone number from Meta API response (normalized to digits only)
+	if phoneNumber, ok := result["display_phone_number"].(string); ok && phoneNumber != "" {
+		normalized := normalizePhoneNumber(phoneNumber)
+		a.DB.Model(&account).Update("phone_number", normalized)
+	}
+
 	// Prepare response
 	response := map[string]interface{}{
 		"success":                  true,
@@ -392,9 +398,21 @@ func accountToResponse(acc models.WhatsAppAccount) AccountResponse {
 		Status:             acc.Status,
 		HasAccessToken:     acc.AccessToken != "",
 		HasAppSecret:       acc.AppSecret != "",
+		PhoneNumber:        acc.PhoneNumber,
 		CreatedAt:          acc.CreatedAt.Format("2006-01-02T15:04:05Z"),
 		UpdatedAt:          acc.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 	}
+}
+
+// normalizePhoneNumber strips all non-digit characters (e.g. "+91 89760 53566" -> "918976053566")
+func normalizePhoneNumber(phone string) string {
+	var digits []byte
+	for i := 0; i < len(phone); i++ {
+		if phone[i] >= '0' && phone[i] <= '9' {
+			digits = append(digits, phone[i])
+		}
+	}
+	return string(digits)
 }
 
 func generateVerifyToken() string {

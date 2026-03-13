@@ -25,6 +25,7 @@ type CampaignRequest struct {
 	WhatsAppAccount string     `json:"whatsapp_account" validate:"required"`
 	TemplateID      string     `json:"template_id" validate:"required"`
 	HeaderMediaID   string     `json:"header_media_id"`
+	UseMMAPI        bool       `json:"use_mm_api"`
 	ScheduledAt     *time.Time `json:"scheduled_at"`
 }
 
@@ -38,6 +39,7 @@ type CampaignResponse struct {
 	HeaderMediaID         string                `json:"header_media_id,omitempty"`
 	HeaderMediaFilename   string                `json:"header_media_filename,omitempty"`
 	HeaderMediaMimeType   string                `json:"header_media_mime_type,omitempty"`
+	UseMMAPI              bool                  `json:"use_mm_api"`
 	Status                models.CampaignStatus `json:"status"`
 	TotalRecipients int                  `json:"total_recipients"`
 	SentCount       int                  `json:"sent_count"`
@@ -115,6 +117,7 @@ func (a *App) ListCampaigns(r *fastglue.Request) error {
 			HeaderMediaID:       c.HeaderMediaID,
 			HeaderMediaFilename: c.HeaderMediaFilename,
 			HeaderMediaMimeType: c.HeaderMediaMimeType,
+			UseMMAPI:            c.UseMMAPI,
 			Status:              c.Status,
 			TotalRecipients:     c.TotalRecipients,
 			SentCount:           c.SentCount,
@@ -174,6 +177,7 @@ func (a *App) CreateCampaign(r *fastglue.Request) error {
 		Name:            req.Name,
 		TemplateID:      templateID,
 		HeaderMediaID:  req.HeaderMediaID,
+		UseMMAPI:       req.UseMMAPI,
 		Status:          models.CampaignStatusDraft,
 		ScheduledAt:     req.ScheduledAt,
 		CreatedBy:       userID,
@@ -195,6 +199,7 @@ func (a *App) CreateCampaign(r *fastglue.Request) error {
 		HeaderMediaID:       campaign.HeaderMediaID,
 		HeaderMediaFilename: campaign.HeaderMediaFilename,
 		HeaderMediaMimeType: campaign.HeaderMediaMimeType,
+		UseMMAPI:            campaign.UseMMAPI,
 		Status:              campaign.Status,
 		TotalRecipients:     campaign.TotalRecipients,
 		SentCount:           campaign.SentCount,
@@ -233,6 +238,7 @@ func (a *App) GetCampaign(r *fastglue.Request) error {
 		HeaderMediaID:       campaign.HeaderMediaID,
 		HeaderMediaFilename: campaign.HeaderMediaFilename,
 		HeaderMediaMimeType: campaign.HeaderMediaMimeType,
+		UseMMAPI:            campaign.UseMMAPI,
 		Status:              campaign.Status,
 		TotalRecipients:     campaign.TotalRecipients,
 		SentCount:           campaign.SentCount,
@@ -312,6 +318,7 @@ func (a *App) UpdateCampaign(r *fastglue.Request) error {
 		HeaderMediaID:       campaign.HeaderMediaID,
 		HeaderMediaFilename: campaign.HeaderMediaFilename,
 		HeaderMediaMimeType: campaign.HeaderMediaMimeType,
+		UseMMAPI:            campaign.UseMMAPI,
 		Status:              campaign.Status,
 		TotalRecipients:     campaign.TotalRecipients,
 		SentCount:           campaign.SentCount,

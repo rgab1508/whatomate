@@ -50,6 +50,7 @@ type OutgoingMessageRequest struct {
 	Template      *models.Template
 	BodyParams    map[string]string // Parameter name -> value (supports both named and positional)
 	HeaderMediaID string            // WhatsApp media ID for dynamic template header image/video/document
+	UseMMAPI      bool              // Use Marketing Messages API (MM Lite) instead of Cloud API
 
 	// WhatsApp Flow messages
 	FlowID          string // Meta Flow ID
@@ -196,6 +197,9 @@ func (a *App) SendOutgoingMessage(ctx context.Context, req OutgoingMessageReques
 				}
 			}
 
+			if req.UseMMAPI {
+				return a.WhatsApp.SendMarketingTemplateMessage(sendCtx, waAccount, req.Contact.PhoneNumber, req.Template.Name, req.Template.Language, components)
+			}
 			return a.WhatsApp.SendTemplateMessage(sendCtx, waAccount, req.Contact.PhoneNumber, req.Template.Name, req.Template.Language, components)
 
 		case models.MessageTypeFlow:
@@ -551,6 +555,7 @@ type SendTemplateMessageRequest struct {
 	TemplateID     string            `json:"template_id"`     // Alternative: template UUID
 	TemplateParams map[string]string `json:"template_params"` // Named or positional params
 	AccountName    string            `json:"account_name"`    // Optional: specific WhatsApp account
+	UseMMAPI       bool              `json:"use_mm_api"`      // Use Marketing Messages API (MM Lite)
 }
 
 // SendTemplateMessage sends a template message to a contact or phone number
@@ -672,6 +677,7 @@ func (a *App) SendTemplateMessage(r *fastglue.Request) error {
 		Type:       models.MessageTypeTemplate,
 		Template:   &template,
 		BodyParams: req.TemplateParams,
+		UseMMAPI:   req.UseMMAPI,
 	}
 
 	opts := DefaultSendOptions()

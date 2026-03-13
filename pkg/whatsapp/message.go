@@ -396,3 +396,48 @@ func (c *Client) SendTemplateMessage(ctx context.Context, account *Account, phon
 	c.Log.Info("Template message sent", "message_id", messageID, "phone", phoneNumber, "template", templateName)
 	return messageID, nil
 }
+
+// SendMarketingTemplateMessage sends a template message via the Marketing Messages API (MM Lite).
+// The payload is identical to SendTemplateMessage but uses the /marketing_messages endpoint.
+func (c *Client) SendMarketingTemplateMessage(ctx context.Context, account *Account, phoneNumber, templateName, languageCode string, components []map[string]interface{}) (string, error) {
+	template := map[string]interface{}{
+		"name": templateName,
+		"language": map[string]interface{}{
+			"code": languageCode,
+		},
+	}
+
+	if len(components) > 0 {
+		template["components"] = components
+	}
+
+	payload := map[string]interface{}{
+		"messaging_product": "whatsapp",
+		"recipient_type":    "individual",
+		"to":                phoneNumber,
+		"type":              "template",
+		"template":          template,
+	}
+
+	url := c.buildMarketingMessagesURL(account)
+	c.Log.Debug("Sending marketing template message (MM Lite)", "phone", phoneNumber, "template", templateName)
+
+	respBody, err := c.doRequest(ctx, "POST", url, payload, account.AccessToken)
+	if err != nil {
+		c.Log.Error("Failed to send marketing template message", "error", err, "phone", phoneNumber, "template", templateName)
+		return "", fmt.Errorf("failed to send marketing template message: %w", err)
+	}
+
+	var resp MetaAPIResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return "", fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if len(resp.Messages) == 0 {
+		return "", fmt.Errorf("no message ID in response")
+	}
+
+	messageID := resp.Messages[0].ID
+	c.Log.Info("Marketing template message sent (MM Lite)", "message_id", messageID, "phone", phoneNumber, "template", templateName)
+	return messageID, nil
+}

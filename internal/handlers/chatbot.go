@@ -1,10 +1,13 @@
 package handlers
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shridarpatil/whatomate/internal/contactutil"
 	"github.com/shridarpatil/whatomate/internal/models"
 	"github.com/valyala/fasthttp"
 	"github.com/zerodha/fastglue"
@@ -75,13 +78,16 @@ type KeywordRuleResponse struct {
 
 // ChatbotFlowResponse represents a chatbot flow for API response
 type ChatbotFlowResponse struct {
-	ID              string   `json:"id"`
-	Name            string   `json:"name"`
-	Description     string   `json:"description"`
-	TriggerKeywords []string `json:"trigger_keywords"`
-	Enabled         bool     `json:"enabled"`
-	StepsCount      int      `json:"steps_count"`
-	CreatedAt       string   `json:"created_at"`
+	ID              string              `json:"id"`
+	Name            string              `json:"name"`
+	Description     string              `json:"description"`
+	TriggerKeywords []string            `json:"trigger_keywords"`
+	TriggerType     models.TriggerType  `json:"trigger_type"`
+	WebhookToken    string              `json:"webhook_token,omitempty"`
+	WebhookURL      string              `json:"webhook_url,omitempty"`
+	Enabled         bool                `json:"enabled"`
+	StepsCount      int                 `json:"steps_count"`
+	CreatedAt       string              `json:"created_at"`
 }
 
 // AIContextResponse represents an AI context for API response
@@ -688,15 +694,25 @@ func (a *App) ListChatbotFlows(r *fastglue.Request) error {
 
 	response := make([]ChatbotFlowResponse, len(flows))
 	for i, flow := range flows {
-		response[i] = ChatbotFlowResponse{
+		triggerType := flow.TriggerType
+		if triggerType == "" {
+			triggerType = models.TriggerTypeKeywords
+		}
+		resp := ChatbotFlowResponse{
 			ID:              flow.ID.String(),
 			Name:            flow.Name,
 			Description:     flow.Description,
 			TriggerKeywords: flow.TriggerKeywords,
+			TriggerType:     triggerType,
 			Enabled:         flow.IsEnabled,
 			StepsCount:      len(flow.Steps),
 			CreatedAt:       flow.CreatedAt.Format(time.RFC3339),
 		}
+		if triggerType == models.TriggerTypeWebhook && flow.WebhookToken != nil && *flow.WebhookToken != "" {
+			resp.WebhookToken = *flow.WebhookToken
+			resp.WebhookURL = "/api/webhook-trigger/" + *flow.WebhookToken
+		}
+		response[i] = resp
 	}
 
 	return r.SendEnvelope(map[string]any{
@@ -743,6 +759,7 @@ func (a *App) CreateChatbotFlow(r *fastglue.Request) error {
 		Name              string                 `json:"name"`
 		Description       string                 `json:"description"`
 		TriggerKeywords   []string               `json:"trigger_keywords"`
+		TriggerType       models.TriggerType     `json:"trigger_type"`
 		InitialMessage    string                 `json:"initial_message"`
 		CompletionMessage string                 `json:"completion_message"`
 		OnCompleteAction  string                 `json:"on_complete_action"`
@@ -760,6 +777,22 @@ func (a *App) CreateChatbotFlow(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Name is required", nil, "")
 	}
 
+	triggerType := req.TriggerType
+	if triggerType == "" {
+		triggerType = models.TriggerTypeKeywords
+	}
+
+	// Generate webhook token if trigger type is webhook
+	var webhookToken *string
+	if triggerType == models.TriggerTypeWebhook {
+		token, err := generateWebhookToken()
+		if err != nil {
+			a.Log.Error("Failed to generate webhook token", "error", err)
+			return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to generate webhook token", nil, "")
+		}
+		webhookToken = &token
+	}
+
 	// Use transaction for flow + steps
 	tx := a.DB.Begin()
 
@@ -770,6 +803,8 @@ func (a *App) CreateChatbotFlow(r *fastglue.Request) error {
 		Name:              req.Name,
 		Description:       req.Description,
 		TriggerKeywords:   req.TriggerKeywords,
+		TriggerType:       triggerType,
+		WebhookToken:      webhookToken,
 		InitialMessage:    req.InitialMessage,
 		CompletionMessage: req.CompletionMessage,
 		OnCompleteAction:  req.OnCompleteAction,
@@ -831,10 +866,25 @@ func (a *App) CreateChatbotFlow(r *fastglue.Request) error {
 	// Invalidate cache
 	a.InvalidateChatbotFlowsCache(orgID)
 
-	return r.SendEnvelope(map[string]interface{}{
+	resp := map[string]interface{}{
 		"id":      flow.ID.String(),
 		"message": "Flow created successfully",
-	})
+	}
+	if webhookToken != nil {
+		resp["webhook_token"] = *webhookToken
+		resp["webhook_url"] = "/api/webhook-trigger/" + *webhookToken
+	}
+
+	return r.SendEnvelope(resp)
+}
+
+// generateWebhookToken generates a cryptographically secure random token
+func generateWebhookToken() (string, error) {
+	bytes := make([]byte, 32)
+	if _, err := rand.Read(bytes); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(bytes), nil
 }
 
 // GetChatbotFlow gets a single chatbot flow with steps
@@ -862,7 +912,36 @@ func (a *App) GetChatbotFlow(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Flow not found", nil, "")
 	}
 
-	return r.SendEnvelope(flow)
+	// Build response with computed webhook_url
+	resp := map[string]interface{}{
+		"id":                 flow.ID,
+		"organization_id":   flow.OrganizationID,
+		"whatsapp_account":  flow.WhatsAppAccount,
+		"name":              flow.Name,
+		"is_enabled":        flow.IsEnabled,
+		"description":       flow.Description,
+		"trigger_keywords":  flow.TriggerKeywords,
+		"trigger_button_id": flow.TriggerButtonID,
+		"trigger_type":      flow.TriggerType,
+		"initial_message":       flow.InitialMessage,
+		"initial_message_type":  flow.InitialMessageType,
+		"initial_template_id":   flow.InitialTemplateID,
+		"completion_message":    flow.CompletionMessage,
+		"on_complete_action":    flow.OnCompleteAction,
+		"completion_config":     flow.CompletionConfig,
+		"timeout_message":       flow.TimeoutMessage,
+		"cancel_keywords":       flow.CancelKeywords,
+		"panel_config":          flow.PanelConfig,
+		"steps":                 flow.Steps,
+		"created_at":            flow.CreatedAt,
+		"updated_at":            flow.UpdatedAt,
+	}
+	if flow.WebhookToken != nil && *flow.WebhookToken != "" {
+		resp["webhook_token"] = *flow.WebhookToken
+		resp["webhook_url"] = "/api/webhook-trigger/" + *flow.WebhookToken
+	}
+
+	return r.SendEnvelope(resp)
 }
 
 // UpdateChatbotFlow updates a chatbot flow
@@ -890,6 +969,8 @@ func (a *App) UpdateChatbotFlow(r *fastglue.Request) error {
 		Name              *string                `json:"name"`
 		Description       *string                `json:"description"`
 		TriggerKeywords   []string               `json:"trigger_keywords"`
+		TriggerType       *models.TriggerType    `json:"trigger_type"`
+		RegenerateToken   bool                   `json:"regenerate_token"`
 		InitialMessage    *string                `json:"initial_message"`
 		CompletionMessage *string                `json:"completion_message"`
 		OnCompleteAction  *string                `json:"on_complete_action"`
@@ -913,6 +994,29 @@ func (a *App) UpdateChatbotFlow(r *fastglue.Request) error {
 	}
 	if len(req.TriggerKeywords) > 0 {
 		flow.TriggerKeywords = req.TriggerKeywords
+	}
+	// Handle trigger type changes
+	if req.TriggerType != nil {
+		flow.TriggerType = *req.TriggerType
+		if *req.TriggerType == models.TriggerTypeWebhook && (flow.WebhookToken == nil || *flow.WebhookToken == "") {
+			token, err := generateWebhookToken()
+			if err != nil {
+				tx.Rollback()
+				return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to generate webhook token", nil, "")
+			}
+			flow.WebhookToken = &token
+		} else if *req.TriggerType == models.TriggerTypeKeywords {
+			flow.WebhookToken = nil
+		}
+	}
+	// Regenerate token on request
+	if req.RegenerateToken && flow.TriggerType == models.TriggerTypeWebhook {
+		token, err := generateWebhookToken()
+		if err != nil {
+			tx.Rollback()
+			return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to generate webhook token", nil, "")
+		}
+		flow.WebhookToken = &token
 	}
 	if req.InitialMessage != nil {
 		flow.InitialMessage = *req.InitialMessage
@@ -1354,4 +1458,67 @@ func (a *App) getChatbotStats(orgID uuid.UUID) ChatbotStatsResponse {
 		Count(&stats.AIContextsCount)
 
 	return stats
+}
+
+// HandleWebhookTrigger handles incoming webhook requests to trigger chatbot flows
+func (a *App) HandleWebhookTrigger(r *fastglue.Request) error {
+	token := r.RequestCtx.UserValue("token").(string)
+	if token == "" {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Missing token", nil, "")
+	}
+
+	// Look up flow by webhook token
+	var flow models.ChatbotFlow
+	if err := a.DB.Where("webhook_token = ? AND is_enabled = true AND trigger_type = ?",
+		token, models.TriggerTypeWebhook).
+		Preload("Steps", func(db *gorm.DB) *gorm.DB {
+			return db.Order("step_order ASC")
+		}).
+		First(&flow).Error; err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Flow not found or disabled", nil, "")
+	}
+
+	// Parse request body
+	var req struct {
+		PhoneNumber string                 `json:"phone_number"`
+		WABANumber  string                 `json:"waba_number"`
+		Data        map[string]interface{} `json:"data"`
+	}
+
+	if err := json.Unmarshal(r.RequestCtx.PostBody(), &req); err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Invalid request body", nil, "")
+	}
+
+	if req.PhoneNumber == "" {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "phone_number is required", nil, "")
+	}
+
+	if req.WABANumber == "" {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "waba_number is required", nil, "")
+	}
+
+	// Look up WhatsApp account by phone number
+	var account models.WhatsAppAccount
+	if err := a.DB.Where("phone_number = ? AND organization_id = ?",
+		req.WABANumber, flow.OrganizationID).First(&account).Error; err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "WhatsApp account not found for the given waba_number", nil, "")
+	}
+
+	// Get or create contact
+	contact, _, err := contactutil.GetOrCreateContact(a.DB, flow.OrganizationID, req.PhoneNumber, "")
+	if err != nil {
+		a.Log.Error("Failed to get or create contact for webhook trigger", "error", err, "phone", req.PhoneNumber)
+		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to process contact", nil, "")
+	}
+
+	// Create a new session (always new for webhook triggers to support parallel flows)
+	session := a.createWebhookSession(flow.OrganizationID, contact.ID, account.Name, req.PhoneNumber, req.Data)
+
+	// Start the flow
+	a.startFlow(&account, session, contact, &flow)
+
+	return r.SendEnvelope(map[string]interface{}{
+		"success":    true,
+		"session_id": session.ID.String(),
+	})
 }

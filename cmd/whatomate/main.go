@@ -512,6 +512,10 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 		if len(path) >= 28 && path[:28] == "/api/custom-actions/redirect" {
 			return r
 		}
+		// Skip auth for webhook trigger (uses token-based auth)
+		if len(path) >= 21 && path[:21] == "/api/webhook-trigger/" {
+			return r
+		}
 		// Apply auth for all other /api routes (supports both JWT and API key)
 		if len(path) > 4 && path[:4] == "/api" {
 			return middleware.AuthWithDB(app.Config.JWT.Secret, app.DB)(r)
@@ -668,6 +672,9 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 	g.GET("/api/chatbot/flows/{id}", app.GetChatbotFlow)
 	g.PUT("/api/chatbot/flows/{id}", app.UpdateChatbotFlow)
 	g.DELETE("/api/chatbot/flows/{id}", app.DeleteChatbotFlow)
+
+	// Webhook Trigger (public endpoint - auth skipped via token)
+	g.POST("/api/webhook-trigger/{token}", app.HandleWebhookTrigger)
 
 	// AI Contexts
 	g.GET("/api/chatbot/ai-contexts", app.ListAIContexts)

@@ -412,6 +412,13 @@ const webhookUrl = window.location.origin + basePath + '/api/webhook'
                         <Copy class="h-3 w-3" />
                       </Button>
                     </div>
+                    <div v-if="account.phone_number" class="flex items-center gap-2">
+                      <span class="text-white/50 light:text-gray-500">Phone Number:</span>
+                      <code class="text-xs bg-white/[0.08] light:bg-gray-100 px-1 rounded text-white/70 light:text-gray-600">{{ account.phone_number }}</code>
+                      <Button variant="ghost" size="icon" class="h-6 w-6" @click="copyToClipboard(account.phone_number!, 'Phone Number')">
+                        <Copy class="h-3 w-3" />
+                      </Button>
+                    </div>
                     <div class="flex items-center gap-2">
                       <span class="text-white/50 light:text-gray-500">Business ID:</span>
                       <code class="text-xs bg-white/[0.08] light:bg-gray-100 px-1 rounded text-white/70 light:text-gray-600">{{ account.business_id }}</code>
