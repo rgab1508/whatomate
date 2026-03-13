@@ -109,6 +109,7 @@ type WebhookResponse struct {
 // AvailableWebhookEvents returns the list of available webhook event types
 var AvailableWebhookEvents = []map[string]string{
 	{"value": string(models.WebhookEventMessageIncoming), "label": "Message Incoming", "description": "When a new message is received from a contact"},
+	{"value": string(models.WebhookEventMessageRaw), "label": "Message Raw", "description": "Raw Meta webhook payload for each incoming message"},
 	{"value": string(models.WebhookEventMessageSent), "label": "Message Sent", "description": "When an agent sends a message"},
 	{"value": string(models.WebhookEventContactCreated), "label": "Contact Created", "description": "When a new contact is created"},
 	{"value": string(models.WebhookEventTransferCreated), "label": "Transfer Created", "description": "When a transfer to human agent is requested"},

@@ -87,6 +87,7 @@ const (
 	FlowStepTypeButtons      FlowStepType = "buttons"
 	FlowStepTypeTransfer     FlowStepType = "transfer"
 	FlowStepTypeWhatsAppFlow FlowStepType = "whatsapp_flow"
+	FlowStepTypeBranch       FlowStepType = "branch"
 )
 
 // SessionStatus represents chatbot session states
@@ -171,6 +172,7 @@ const (
 	InputTypeSelect       InputType = "select"
 	InputTypeButton       InputType = "button"
 	InputTypeWhatsAppFlow InputType = "whatsapp_flow"
+	InputTypeLocation     InputType = "location"
 )
 
 // AssignmentStrategy represents team assignment strategies
@@ -198,6 +200,7 @@ type WebhookEvent string
 
 const (
 	WebhookEventMessageIncoming  WebhookEvent = "message.incoming"
+	WebhookEventMessageRaw       WebhookEvent = "message.raw"
 	WebhookEventMessageOutgoing  WebhookEvent = "message.outgoing"
 	WebhookEventMessageSent      WebhookEvent = "message.sent"
 	WebhookEventContactCreated   WebhookEvent = "contact.created"

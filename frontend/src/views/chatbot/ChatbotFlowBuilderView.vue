@@ -53,6 +53,7 @@ import {
   ExternalLink,
   Reply,
   Phone,
+  GitMerge,
 } from 'lucide-vue-next'
 import draggable from 'vuedraggable'
 import FlowChart from '@/components/chatbot/flow-builder/FlowChart.vue'
@@ -242,24 +243,26 @@ const defaultWebhookConfig: WebhookConfig = {
   body: ''
 }
 
-const defaultStep: FlowStep = {
-  step_name: '',
-  step_order: 0,
-  message: '',
-  message_type: 'text',
-  input_type: 'text',
-  input_config: {},
-  api_config: { ...defaultApiConfig },
-  buttons: [],
-  transfer_config: { ...defaultTransferConfig },
-  validation_regex: '',
-  validation_error: 'Invalid input. Please try again.',
-  store_as: '',
-  next_step: '',
-  conditional_next: {},
-  retry_on_invalid: true,
-  max_retries: 3,
-  skip_condition: ''
+function createDefaultStep(): FlowStep {
+  return {
+    step_name: '',
+    step_order: 0,
+    message: '',
+    message_type: 'text',
+    input_type: 'text',
+    input_config: {},
+    api_config: { ...defaultApiConfig, headers: {}, response_mapping: {} },
+    buttons: [],
+    transfer_config: { ...defaultTransferConfig },
+    validation_regex: '',
+    validation_error: 'Invalid input. Please try again.',
+    store_as: '',
+    next_step: '',
+    conditional_next: {},
+    retry_on_invalid: true,
+    max_retries: 3,
+    skip_condition: ''
+  }
 }
 
 const formData = ref({
@@ -339,7 +342,8 @@ const messageTypes = computed(() => [
   { value: 'buttons', label: t('flowBuilder.messageTypeButtons'), icon: MousePointerClick },
   { value: 'api_fetch', label: t('flowBuilder.messageTypeApi'), icon: Globe },
   { value: 'whatsapp_flow', label: t('flowBuilder.messageTypeWhatsappFlow'), icon: MessageCircle },
-  { value: 'transfer', label: t('flowBuilder.messageTypeTransfer'), icon: Users }
+  { value: 'transfer', label: t('flowBuilder.messageTypeTransfer'), icon: Users },
+  { value: 'branch', label: t('flowBuilder.messageTypeBranch'), icon: GitMerge }
 ])
 
 const inputTypes = computed(() => [
@@ -349,10 +353,21 @@ const inputTypes = computed(() => [
   { value: 'email', label: t('flowBuilder.emailInput') },
   { value: 'phone', label: t('flowBuilder.phoneInput') },
   { value: 'date', label: t('flowBuilder.dateInput') },
+  { value: 'location', label: t('flowBuilder.locationInput') },
   { value: 'select', label: t('flowBuilder.selectionInput') }
 ])
 
 const httpMethods = ['GET', 'POST', 'PUT', 'PATCH']
+
+const branchOperators = [
+  { value: 'equals', label: t('flowBuilder.branchOpEquals') },
+  { value: 'not_equals', label: t('flowBuilder.branchOpNotEquals') },
+  { value: 'exists', label: t('flowBuilder.branchOpExists') },
+  { value: 'not_exists', label: t('flowBuilder.branchOpNotExists') },
+  { value: 'not_empty', label: t('flowBuilder.branchOpNotEmpty') },
+  { value: 'empty', label: t('flowBuilder.branchOpEmpty') },
+  { value: 'contains', label: t('flowBuilder.branchOpContains') },
+]
 
 function getStepIcon(messageType: string) {
   const type = messageTypes.value.find(t => t.value === messageType)
@@ -377,7 +392,7 @@ onMounted(async () => {
   } else {
     // Initialize with one default step
     formData.value.steps = [{
-      ...defaultStep,
+      ...createDefaultStep(),
       step_name: 'step_1',
       step_order: 1,
       message: 'What is your name?',
@@ -394,8 +409,8 @@ onMounted(async () => {
 async function fetchWhatsAppFlows() {
   try {
     const response = await flowsService.list()
-    const data = response.data as any
-    const allFlows = data.data?.flows ?? data.flows ?? []
+    const data = response.data
+    const allFlows = data.data.flows || []
     whatsappFlows.value = allFlows.filter(
       (f: WhatsAppFlow) => f.meta_flow_id && f.status?.toUpperCase() === 'PUBLISHED'
     )
@@ -480,7 +495,7 @@ async function loadFlow(id: string) {
 function addStep() {
   const newOrder = formData.value.steps.length + 1
   formData.value.steps.push({
-    ...defaultStep,
+    ...createDefaultStep(),
     step_name: `step_${newOrder}`,
     step_order: newOrder,
   })
@@ -1426,6 +1441,7 @@ function confirmCancel() {
                               </SelectTrigger>
                               <SelectContent>
                                 <SelectItem value="__default__">{{ $t('flowBuilder.nextStepSequential') }}</SelectItem>
+                                <SelectItem value="__end__">{{ $t('flowBuilder.endFlow') }}</SelectItem>
                                 <SelectItem
                                   v-for="step in stepsWithNames"
                                   :key="`goto-${step.step_name}`"
@@ -1602,13 +1618,132 @@ function confirmCancel() {
                     </div>
                   </div>
                 </template>
+
+                <!-- Branch Configuration -->
+                <template v-if="selectedStep.message_type === 'branch'">
+                  <div class="space-y-3">
+                    <p class="text-xs text-muted-foreground">
+                      {{ $t('flowBuilder.branchDescription') }}
+                    </p>
+
+                    <!-- Variable to check -->
+                    <div class="space-y-1.5">
+                      <Label class="text-xs">{{ $t('flowBuilder.branchVariable') }}</Label>
+                      <Select
+                        :model-value="selectedStep.input_config.variable || ''"
+                        @update:model-value="selectedStep.input_config = { ...selectedStep.input_config, variable: $event }"
+                      >
+                        <SelectTrigger class="h-8 text-xs">
+                          <SelectValue :placeholder="$t('flowBuilder.branchVariablePlaceholder')" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem
+                            v-for="v in availableVariables"
+                            :key="v.key"
+                            :value="v.key"
+                          >
+                            {{ v.key }} <span class="text-muted-foreground">({{ v.stepName }})</span>
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <Input
+                        :model-value="selectedStep.input_config.variable || ''"
+                        @update:model-value="selectedStep.input_config = { ...selectedStep.input_config, variable: $event }"
+                        :placeholder="$t('flowBuilder.branchVariableManual')"
+                        class="h-8 text-xs"
+                      />
+                    </div>
+
+                    <!-- Operator -->
+                    <div class="space-y-1.5">
+                      <Label class="text-xs">{{ $t('flowBuilder.branchOperator') }}</Label>
+                      <Select
+                        :model-value="selectedStep.input_config.operator || 'equals'"
+                        @update:model-value="selectedStep.input_config = { ...selectedStep.input_config, operator: $event }"
+                      >
+                        <SelectTrigger class="h-8 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem v-for="op in branchOperators" :key="op.value" :value="op.value">
+                            {{ op.label }}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <!-- Value (hidden for exists/not_exists/empty/not_empty) -->
+                    <div
+                      v-if="!['exists', 'not_exists', 'empty', 'not_empty'].includes(selectedStep.input_config.operator || '')"
+                      class="space-y-1.5"
+                    >
+                      <Label class="text-xs">{{ $t('flowBuilder.branchValue') }}</Label>
+                      <Input
+                        :model-value="selectedStep.input_config.value || ''"
+                        @update:model-value="selectedStep.input_config = { ...selectedStep.input_config, value: $event }"
+                        :placeholder="$t('flowBuilder.branchValuePlaceholder')"
+                        class="h-8 text-xs"
+                      />
+                    </div>
+
+                    <Separator />
+
+                    <!-- True path -->
+                    <div class="space-y-1.5">
+                      <Label class="text-xs text-green-600">{{ $t('flowBuilder.branchTruePath') }}</Label>
+                      <Select
+                        :model-value="selectedStep.conditional_next?.['true'] || '__default__'"
+                        @update:model-value="selectedStep.conditional_next = { ...selectedStep.conditional_next, true: String($event) === '__default__' ? '' : String($event) }"
+                      >
+                        <SelectTrigger class="h-8 text-xs border-green-200">
+                          <SelectValue :placeholder="$t('flowBuilder.nextStepSequential')" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__default__">{{ $t('flowBuilder.nextStepSequential') }}</SelectItem>
+                          <SelectItem value="__end__">{{ $t('flowBuilder.endFlow') }}</SelectItem>
+                          <SelectItem
+                            v-for="step in stepsWithNames"
+                            :key="`true-${step.step_name}`"
+                            :value="step.step_name"
+                          >
+                            {{ step.step_name }}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <!-- False path -->
+                    <div class="space-y-1.5">
+                      <Label class="text-xs text-red-600">{{ $t('flowBuilder.branchFalsePath') }}</Label>
+                      <Select
+                        :model-value="selectedStep.conditional_next?.['false'] || '__default__'"
+                        @update:model-value="selectedStep.conditional_next = { ...selectedStep.conditional_next, false: String($event) === '__default__' ? '' : String($event) }"
+                      >
+                        <SelectTrigger class="h-8 text-xs border-red-200">
+                          <SelectValue :placeholder="$t('flowBuilder.nextStepSequential')" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__default__">{{ $t('flowBuilder.nextStepSequential') }}</SelectItem>
+                          <SelectItem value="__end__">{{ $t('flowBuilder.endFlow') }}</SelectItem>
+                          <SelectItem
+                            v-for="step in stepsWithNames"
+                            :key="`false-${step.step_name}`"
+                            :value="step.step_name"
+                          >
+                            {{ step.step_name }}
+                          </SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                </template>
               </CollapsibleContent>
             </Collapsible>
 
-            <Separator v-if="selectedStep.message_type !== 'transfer'" />
+            <Separator v-if="selectedStep.message_type !== 'transfer' && selectedStep.message_type !== 'branch'" />
 
             <!-- Input Configuration (not for transfer) -->
-            <Collapsible v-if="selectedStep.message_type !== 'transfer'" v-model:open="inputOpen">
+            <Collapsible v-if="selectedStep.message_type !== 'transfer' && selectedStep.message_type !== 'branch'" v-model:open="inputOpen">
               <CollapsibleTrigger class="flex items-center justify-between w-full py-1 text-sm font-medium">
                 {{ $t('flowBuilder.input') }}
                 <component :is="inputOpen ? ChevronDown : ChevronRight" class="h-4 w-4" />
@@ -1643,10 +1778,10 @@ function confirmCancel() {
               </CollapsibleContent>
             </Collapsible>
 
-            <Separator v-if="selectedStep.message_type !== 'transfer'" />
+            <Separator v-if="selectedStep.message_type !== 'transfer' && selectedStep.message_type !== 'branch'" />
 
             <!-- Validation (not for transfer) -->
-            <Collapsible v-if="selectedStep.message_type !== 'transfer'" v-model:open="validationOpen">
+            <Collapsible v-if="selectedStep.message_type !== 'transfer' && selectedStep.message_type !== 'branch'" v-model:open="validationOpen">
               <CollapsibleTrigger class="flex items-center justify-between w-full py-1 text-sm font-medium">
                 {{ $t('flowBuilder.validation') }}
                 <component :is="validationOpen ? ChevronDown : ChevronRight" class="h-4 w-4" />
@@ -1678,16 +1813,40 @@ function confirmCancel() {
               </CollapsibleContent>
             </Collapsible>
 
-            <Separator v-if="selectedStep.message_type !== 'transfer'" />
+            <Separator v-if="selectedStep.message_type !== 'branch'" />
 
-            <!-- Advanced (not for transfer) -->
-            <Collapsible v-if="selectedStep.message_type !== 'transfer'" v-model:open="advancedOpen">
+            <!-- Advanced -->
+            <Collapsible v-if="selectedStep.message_type !== 'branch'" v-model:open="advancedOpen">
               <CollapsibleTrigger class="flex items-center justify-between w-full py-1 text-sm font-medium">
                 {{ $t('flowBuilder.advanced') }}
                 <component :is="advancedOpen ? ChevronDown : ChevronRight" class="h-4 w-4" />
               </CollapsibleTrigger>
               <CollapsibleContent class="pt-3 space-y-3">
-                <div class="space-y-1.5">
+                <!-- Go to (for non-button steps; buttons have per-button go-to) -->
+                <div v-if="selectedStep.message_type !== 'buttons'" class="space-y-1.5">
+                  <Label class="text-xs">{{ $t('flowBuilder.goTo') }}</Label>
+                  <Select
+                    :model-value="selectedStep.next_step || '__default__'"
+                    @update:model-value="selectedStep.next_step = String($event) === '__default__' ? '' : String($event)"
+                  >
+                    <SelectTrigger class="h-8 text-xs">
+                      <SelectValue :placeholder="$t('flowBuilder.nextStepSequential')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__default__">{{ $t('flowBuilder.nextStepSequential') }}</SelectItem>
+                      <SelectItem value="__end__">{{ $t('flowBuilder.endFlow') }}</SelectItem>
+                      <SelectItem
+                        v-for="step in stepsWithNames.filter(s => s.step_name !== selectedStep?.step_name)"
+                        :key="`goto-next-${step.step_name}`"
+                        :value="step.step_name"
+                      >
+                        {{ step.step_name }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p class="text-xs text-muted-foreground">{{ $t('flowBuilder.goToHint') }}</p>
+                </div>
+                <div v-if="selectedStep.message_type !== 'transfer'" class="space-y-1.5">
                   <Label class="text-xs">{{ $t('flowBuilder.skipCondition') }}</Label>
                   <Input v-model="selectedStep.skip_condition" :placeholder="$t('flowBuilder.skipConditionPlaceholder')" class="h-8 text-xs font-mono" />
                   <p class="text-xs text-muted-foreground">{{ $t('flowBuilder.skipConditionHint') }}</p>
