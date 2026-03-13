@@ -4,6 +4,25 @@
 
 Modern, open-source WhatsApp Business Platform. Single binary app.
 
+## Fork Features
+
+This fork adds the following features on top of upstream Whatomate:
+
+- **Flow Builder: Branching Logic**
+  Conditional routing in chatbot flows based on evaluated variables, with UI components for configuring branch conditions and paths.
+
+- **Flow Builder: Explicit End Flow & Location Input Validation**
+  Support for explicitly ending a flow and validating location inputs within the flow builder.
+
+- **API Variable Support in Flows**
+  Dynamic variable replacement in API calls using contact and organization context data. Merges contact metadata and org details into API request templates.
+
+- **Raw Payload Support in Message Processing**
+  Passes the display phone number and raw webhook message data through the processing pipeline, providing richer context for chatbot processing.
+
+- **Dynamic Template Header Media ID**
+  Support for passing media IDs in template message headers, enabling dynamic media content in WhatsApp templates.
+
 ![Dashboard](docs/public/images/dashboard-light.png#gh-light-mode-only)
 ![Dashboard](docs/public/images/dashboard-dark.png#gh-dark-mode-only)
 
