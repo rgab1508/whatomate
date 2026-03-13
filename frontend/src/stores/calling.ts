@@ -1,6 +1,8 @@
 import { defineStore } from 'pinia'
-import { ref, computed } from 'vue'
+import { ref, reactive, computed } from 'vue'
 import { callLogsService, ivrFlowsService, callTransfersService, outgoingCallsService, type CallLog, type IVRFlow, type CallTransfer } from '@/services/api'
+import { toast } from 'vue-sonner'
+import { i18n } from '@/i18n'
 
 export const useCallingStore = defineStore('calling', () => {
   // Call Logs state
@@ -29,11 +31,15 @@ export const useCallingStore = defineStore('calling', () => {
   const isMuted = ref(false)
   let durationTimer: number | null = null
 
+  // Call permission state (in-memory only, cleared on refresh)
+  const callPermissions = reactive(new Map<string, { status: string, expiresAt?: string }>())
+
   // Outgoing call state
   const outgoingCallLogId = ref<string | null>(null)
   const outgoingCallStatus = ref<'initiating' | 'ringing' | 'answered' | 'ended' | null>(null)
   const outgoingContactName = ref<string>('')
   const outgoingContactPhone = ref<string>('')
+  const isTransferring = ref(false)
 
   // Computed
   const activeFlows = computed(() => ivrFlows.value.filter(f => f.is_active && f.is_call_start))
@@ -336,6 +342,22 @@ export const useCallingStore = defineStore('calling', () => {
     }, 1000)
   }
 
+  async function initiateTransfer(teamId: string, agentId?: string) {
+    const callLogId = outgoingCallLogId.value ?? activeTransfer.value?.call_log_id
+    if (!callLogId) throw new Error('No active call to transfer')
+    isTransferring.value = true
+    try {
+      await callTransfersService.initiate({
+        call_log_id: callLogId,
+        team_id: teamId,
+        ...(agentId ? { agent_id: agentId } : {}),
+      })
+      cleanup() // Agent is disconnected — tear down local WebRTC
+    } finally {
+      isTransferring.value = false
+    }
+  }
+
   async function endCall() {
     if (outgoingCallLogId.value) {
       // Outgoing call hangup
@@ -388,6 +410,15 @@ export const useCallingStore = defineStore('calling', () => {
     isMuted.value = false
   }
 
+  // Call permission helpers
+  function getCallPermission(contactId: string) {
+    return callPermissions.get(contactId) ?? null
+  }
+
+  function setCallPermissionPending(contactId: string) {
+    callPermissions.set(contactId, { status: 'pending' })
+  }
+
   // WebSocket handler for call events
   function handleCallEvent(type: string, payload: any) {
     switch (type) {
@@ -429,6 +460,24 @@ export const useCallingStore = defineStore('calling', () => {
       case 'outgoing_call_ended':
         cleanup()
         break
+      case 'call_permission_update': {
+        const t = i18n.global.t
+        const contactId = payload.contact_id
+        callPermissions.set(contactId, {
+          status: payload.status,
+          expiresAt: payload.expires_at,
+        })
+        if (payload.status === 'accepted') {
+          toast.success(t('outgoingCalls.permissionAccepted'), {
+            description: payload.contact_name || payload.contact_phone,
+          })
+        } else {
+          toast.error(t('outgoingCalls.permissionDeclined'), {
+            description: payload.contact_name || payload.contact_phone,
+          })
+        }
+        break
+      }
       default:
         // For regular call events, refresh call logs
         fetchCallLogs()
@@ -468,6 +517,8 @@ export const useCallingStore = defineStore('calling', () => {
     endCall,
     toggleMute,
     cleanup,
+    isTransferring,
+    initiateTransfer,
     // Outgoing calls
     outgoingCallLogId,
     outgoingCallStatus,
@@ -475,6 +526,10 @@ export const useCallingStore = defineStore('calling', () => {
     outgoingContactPhone,
     isOutgoingCall,
     makeOutgoingCall,
+    // Call permissions
+    callPermissions,
+    getCallPermission,
+    setCallPermissionPending,
     // WS handler
     handleCallEvent
   }
