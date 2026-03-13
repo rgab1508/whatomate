@@ -243,24 +243,26 @@ const defaultWebhookConfig: WebhookConfig = {
   body: ''
 }
 
-const defaultStep: FlowStep = {
-  step_name: '',
-  step_order: 0,
-  message: '',
-  message_type: 'text',
-  input_type: 'text',
-  input_config: {},
-  api_config: { ...defaultApiConfig },
-  buttons: [],
-  transfer_config: { ...defaultTransferConfig },
-  validation_regex: '',
-  validation_error: 'Invalid input. Please try again.',
-  store_as: '',
-  next_step: '',
-  conditional_next: {},
-  retry_on_invalid: true,
-  max_retries: 3,
-  skip_condition: ''
+function createDefaultStep(): FlowStep {
+  return {
+    step_name: '',
+    step_order: 0,
+    message: '',
+    message_type: 'text',
+    input_type: 'text',
+    input_config: {},
+    api_config: { ...defaultApiConfig, headers: {}, response_mapping: {} },
+    buttons: [],
+    transfer_config: { ...defaultTransferConfig },
+    validation_regex: '',
+    validation_error: 'Invalid input. Please try again.',
+    store_as: '',
+    next_step: '',
+    conditional_next: {},
+    retry_on_invalid: true,
+    max_retries: 3,
+    skip_condition: ''
+  }
 }
 
 const formData = ref({
@@ -351,6 +353,7 @@ const inputTypes = computed(() => [
   { value: 'email', label: t('flowBuilder.emailInput') },
   { value: 'phone', label: t('flowBuilder.phoneInput') },
   { value: 'date', label: t('flowBuilder.dateInput') },
+  { value: 'location', label: t('flowBuilder.locationInput') },
   { value: 'select', label: t('flowBuilder.selectionInput') }
 ])
 
@@ -389,7 +392,7 @@ onMounted(async () => {
   } else {
     // Initialize with one default step
     formData.value.steps = [{
-      ...defaultStep,
+      ...createDefaultStep(),
       step_name: 'step_1',
       step_order: 1,
       message: 'What is your name?',
@@ -492,7 +495,7 @@ async function loadFlow(id: string) {
 function addStep() {
   const newOrder = formData.value.steps.length + 1
   formData.value.steps.push({
-    ...defaultStep,
+    ...createDefaultStep(),
     step_name: `step_${newOrder}`,
     step_order: newOrder,
   })
@@ -1438,6 +1441,7 @@ function confirmCancel() {
                               </SelectTrigger>
                               <SelectContent>
                                 <SelectItem value="__default__">{{ $t('flowBuilder.nextStepSequential') }}</SelectItem>
+                                <SelectItem value="__end__">{{ $t('flowBuilder.endFlow') }}</SelectItem>
                                 <SelectItem
                                   v-for="step in stepsWithNames"
                                   :key="`goto-${step.step_name}`"
@@ -1696,6 +1700,7 @@ function confirmCancel() {
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="__default__">{{ $t('flowBuilder.nextStepSequential') }}</SelectItem>
+                          <SelectItem value="__end__">{{ $t('flowBuilder.endFlow') }}</SelectItem>
                           <SelectItem
                             v-for="step in stepsWithNames"
                             :key="`true-${step.step_name}`"
@@ -1719,6 +1724,7 @@ function confirmCancel() {
                         </SelectTrigger>
                         <SelectContent>
                           <SelectItem value="__default__">{{ $t('flowBuilder.nextStepSequential') }}</SelectItem>
+                          <SelectItem value="__end__">{{ $t('flowBuilder.endFlow') }}</SelectItem>
                           <SelectItem
                             v-for="step in stepsWithNames"
                             :key="`false-${step.step_name}`"
@@ -1807,16 +1813,40 @@ function confirmCancel() {
               </CollapsibleContent>
             </Collapsible>
 
-            <Separator v-if="selectedStep.message_type !== 'transfer' && selectedStep.message_type !== 'branch'" />
+            <Separator v-if="selectedStep.message_type !== 'branch'" />
 
-            <!-- Advanced (not for transfer) -->
-            <Collapsible v-if="selectedStep.message_type !== 'transfer' && selectedStep.message_type !== 'branch'" v-model:open="advancedOpen">
+            <!-- Advanced -->
+            <Collapsible v-if="selectedStep.message_type !== 'branch'" v-model:open="advancedOpen">
               <CollapsibleTrigger class="flex items-center justify-between w-full py-1 text-sm font-medium">
                 {{ $t('flowBuilder.advanced') }}
                 <component :is="advancedOpen ? ChevronDown : ChevronRight" class="h-4 w-4" />
               </CollapsibleTrigger>
               <CollapsibleContent class="pt-3 space-y-3">
-                <div class="space-y-1.5">
+                <!-- Go to (for non-button steps; buttons have per-button go-to) -->
+                <div v-if="selectedStep.message_type !== 'buttons'" class="space-y-1.5">
+                  <Label class="text-xs">{{ $t('flowBuilder.goTo') }}</Label>
+                  <Select
+                    :model-value="selectedStep.next_step || '__default__'"
+                    @update:model-value="selectedStep.next_step = String($event) === '__default__' ? '' : String($event)"
+                  >
+                    <SelectTrigger class="h-8 text-xs">
+                      <SelectValue :placeholder="$t('flowBuilder.nextStepSequential')" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__default__">{{ $t('flowBuilder.nextStepSequential') }}</SelectItem>
+                      <SelectItem value="__end__">{{ $t('flowBuilder.endFlow') }}</SelectItem>
+                      <SelectItem
+                        v-for="step in stepsWithNames.filter(s => s.step_name !== selectedStep?.step_name)"
+                        :key="`goto-next-${step.step_name}`"
+                        :value="step.step_name"
+                      >
+                        {{ step.step_name }}
+                      </SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p class="text-xs text-muted-foreground">{{ $t('flowBuilder.goToHint') }}</p>
+                </div>
+                <div v-if="selectedStep.message_type !== 'transfer'" class="space-y-1.5">
                   <Label class="text-xs">{{ $t('flowBuilder.skipCondition') }}</Label>
                   <Input v-model="selectedStep.skip_condition" :placeholder="$t('flowBuilder.skipConditionPlaceholder')" class="h-8 text-xs font-mono" />
                   <p class="text-xs text-muted-foreground">{{ $t('flowBuilder.skipConditionHint') }}</p>

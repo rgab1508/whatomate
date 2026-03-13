@@ -172,6 +172,7 @@ const (
 	InputTypeSelect       InputType = "select"
 	InputTypeButton       InputType = "button"
 	InputTypeWhatsAppFlow InputType = "whatsapp_flow"
+	InputTypeLocation     InputType = "location"
 )
 
 // AssignmentStrategy represents team assignment strategies

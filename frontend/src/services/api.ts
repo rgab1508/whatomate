@@ -211,7 +211,7 @@ export const templatesService = {
 
 export const flowsService = {
   list: (params?: { account?: string; search?: string; page?: number; limit?: number }) =>
-    api.get<{ flows: any[]; total?: number }>('/flows', { params }),
+    api.get<{ data: { flows: any[]; total?: number } }>('/flows', { params }),
   create: (data: any) => api.post('/flows', data),
   update: (id: string, data: any) => api.put(`/flows/${id}`, data),
   delete: (id: string) => api.delete(`/flows/${id}`),

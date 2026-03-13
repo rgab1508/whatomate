@@ -42,6 +42,7 @@ interface Template {
   status: string
   header_type: string
   header_content: string
+  header_media_id: string
   body_content: string
   footer_content: string
   buttons: any[]
@@ -84,6 +85,7 @@ const formData = ref({
   category: 'UTILITY',
   header_type: 'NONE',
   header_content: '',
+  header_media_id: '',
   body_content: '',
   footer_content: '',
   buttons: [] as any[],
@@ -297,6 +299,7 @@ function openCreateDialog() {
     category: 'UTILITY',
     header_type: 'NONE',
     header_content: '',
+    header_media_id: '',
     body_content: '',
     footer_content: '',
     buttons: [],
@@ -319,6 +322,7 @@ function openEditDialog(template: Template) {
     category: template.category,
     header_type: template.header_type || 'NONE',
     header_content: template.header_content || '',
+    header_media_id: template.header_media_id || '',
     body_content: template.body_content,
     footer_content: template.footer_content || '',
     buttons: template.buttons || [],
@@ -508,6 +512,7 @@ function onHeaderMediaFileChange(event: Event) {
     // Clear previous handle when new file is selected
     headerMediaHandle.value = ''
     formData.value.header_content = ''
+    formData.value.header_media_id = ''
   }
 }
 
@@ -529,6 +534,7 @@ async function uploadHeaderMedia() {
     const data = response.data.data
     headerMediaHandle.value = data.handle
     formData.value.header_content = data.handle
+    formData.value.header_media_id = data.media_id
     toast.success(t('templates.mediaUploadedSuccess'))
   } catch (error) {
     toast.error(getErrorMessage(error, t('templates.uploadFailed')))

@@ -76,6 +76,11 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body interfa
 			return nil, fmt.Errorf("failed to marshal request body: %w", err)
 		}
 		reqBody = bytes.NewBuffer(jsonBody)
+
+		prettyBody, _ := json.MarshalIndent(body, "", "  ")
+		c.Log.Info(fmt.Sprintf("Meta API request: %s %s\nPayload:\n%s", method, url, string(prettyBody)))
+	} else {
+		c.Log.Info(fmt.Sprintf("Meta API request: %s %s (no body)", method, url))
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, url, reqBody)
@@ -96,6 +101,8 @@ func (c *Client) doRequest(ctx context.Context, method, url string, body interfa
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
+
+	c.Log.Info(fmt.Sprintf("Meta API response: %s %s [%d]\nResponse:\n%s", method, url, resp.StatusCode, string(respBody)))
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, ParseMetaAPIError(resp.StatusCode, respBody)

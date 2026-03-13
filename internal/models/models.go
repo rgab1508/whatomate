@@ -403,6 +403,7 @@ type Template struct {
 	Status          string     `gorm:"size:20;default:'PENDING'" json:"status"`       // PENDING, APPROVED, REJECTED
 	HeaderType      string     `gorm:"size:20" json:"header_type"`                    // TEXT, IMAGE, DOCUMENT, VIDEO
 	HeaderContent   string     `gorm:"type:text" json:"header_content"`
+	HeaderMediaID   string     `gorm:"size:255" json:"header_media_id"`              // WhatsApp media ID for sending
 	BodyContent     string     `gorm:"type:text;not null" json:"body_content"`
 	FooterContent   string     `gorm:"type:text" json:"footer_content"`
 	Buttons         JSONBArray  `gorm:"type:jsonb;default:'[]'" json:"buttons"`

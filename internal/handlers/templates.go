@@ -21,6 +21,7 @@ type TemplateRequest struct {
 	Category        string        `json:"category" validate:"required"` // MARKETING, UTILITY, AUTHENTICATION
 	HeaderType      string        `json:"header_type"`                  // TEXT, IMAGE, DOCUMENT, VIDEO, NONE
 	HeaderContent   string        `json:"header_content"`
+	HeaderMediaID   string        `json:"header_media_id"`              // WhatsApp media ID for sending
 	BodyContent     string        `json:"body_content" validate:"required"`
 	FooterContent   string        `json:"footer_content"`
 	Buttons         []interface{} `json:"buttons"`
@@ -39,6 +40,7 @@ type TemplateResponse struct {
 	Status          string        `json:"status"`
 	HeaderType      string        `json:"header_type"`
 	HeaderContent   string        `json:"header_content"`
+	HeaderMediaID   string        `json:"header_media_id"`
 	BodyContent     string        `json:"body_content"`
 	FooterContent   string        `json:"footer_content"`
 	Buttons         []interface{} `json:"buttons"`
@@ -146,6 +148,7 @@ func (a *App) CreateTemplate(r *fastglue.Request) error {
 		Status:          "DRAFT", // Local draft until submitted to Meta
 		HeaderType:      strings.ToUpper(req.HeaderType),
 		HeaderContent:   req.HeaderContent,
+		HeaderMediaID:   req.HeaderMediaID,
 		BodyContent:     req.BodyContent,
 		FooterContent:   req.FooterContent,
 		Buttons:         convertToJSONBArray(req.Buttons),
@@ -221,6 +224,9 @@ func (a *App) UpdateTemplate(r *fastglue.Request) error {
 		template.HeaderType = strings.ToUpper(req.HeaderType)
 	}
 	template.HeaderContent = req.HeaderContent
+	if req.HeaderMediaID != "" {
+		template.HeaderMediaID = req.HeaderMediaID
+	}
 	if req.BodyContent != "" {
 		template.BodyContent = req.BodyContent
 	}
@@ -484,6 +490,7 @@ func templateToResponse(t models.Template) TemplateResponse {
 		Status:          t.Status,
 		HeaderType:      t.HeaderType,
 		HeaderContent:   t.HeaderContent,
+		HeaderMediaID:   t.HeaderMediaID,
 		BodyContent:     t.BodyContent,
 		FooterContent:   t.FooterContent,
 		Buttons:         convertFromJSONBArray(t.Buttons),
@@ -590,7 +597,7 @@ func (a *App) UploadTemplateMedia(r *fastglue.Request) error {
 	// Create whatsapp account with AppID
 	waAccount := a.toWhatsAppAccount(account)
 
-	// Perform resumable upload to get handle
+	// Perform resumable upload to get handle (for template creation)
 	ctx := context.Background()
 	handle, err := a.WhatsApp.ResumableUpload(ctx, waAccount, fileData, mimeType, fileHeader.Filename)
 	if err != nil {
@@ -598,8 +605,15 @@ func (a *App) UploadTemplateMedia(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusBadGateway, "Failed to upload media to Meta", nil, "")
 	}
 
+	// Also upload via regular media API to get a media ID (for sending template messages)
+	mediaID, err := a.WhatsApp.UploadMedia(ctx, waAccount, fileData, mimeType, fileHeader.Filename)
+	if err != nil {
+		a.Log.Warn("Failed to upload media for sending (handle still valid for template creation)", "error", err)
+	}
+
 	return r.SendEnvelope(map[string]interface{}{
 		"handle":    handle,
+		"media_id":  mediaID,
 		"filename":  fileHeader.Filename,
 		"mime_type": mimeType,
 		"size":      fileHeader.Size,
