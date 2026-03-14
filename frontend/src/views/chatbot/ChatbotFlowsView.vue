@@ -11,7 +11,7 @@ import { chatbotService } from '@/services/api'
 import { toast } from 'vue-sonner'
 import { PageHeader, DataTable, DeleteConfirmDialog, SearchInput, type Column } from '@/components/shared'
 import { getErrorMessage } from '@/lib/api-utils'
-import { Plus, Pencil, Trash2, Workflow } from 'lucide-vue-next'
+import { Plus, Pencil, Trash2, Workflow, Activity } from 'lucide-vue-next'
 import { useDebounceFn } from '@vueuse/core'
 
 const { t } = useI18n()
@@ -199,6 +199,9 @@ async function confirmDeleteFlow() {
                 </template>
                 <template #cell-actions="{ item: flow }">
                   <div class="flex items-center justify-end gap-1">
+                    <Button variant="ghost" size="icon" class="h-8 w-8" @click="router.push(`/chatbot/flows/${flow.id}/runs`)" title="View Runs">
+                      <Activity class="h-4 w-4" />
+                    </Button>
                     <Button variant="ghost" size="icon" class="h-8 w-8" @click="editFlow(flow)">
                       <Pencil class="h-4 w-4" />
                     </Button>

@@ -1417,6 +1417,75 @@ func (a *App) GetChatbotSession(r *fastglue.Request) error {
 	return r.SendEnvelope(session)
 }
 
+// GetSessionFlowLogs returns the step-by-step execution logs for a flow session
+func (a *App) GetSessionFlowLogs(r *fastglue.Request) error {
+	orgID, err := a.getOrgID(r)
+	if err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
+	}
+
+	id, err := parsePathUUID(r, "id", "session")
+	if err != nil {
+		return nil
+	}
+
+	// Verify session belongs to org
+	var session models.ChatbotSession
+	if err := a.DB.Where("id = ? AND organization_id = ?", id, orgID).First(&session).Error; err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Session not found", nil, "")
+	}
+
+	var logs []models.ChatbotFlowLog
+	if err := a.DB.Where("session_id = ?", id).Order("created_at ASC").Find(&logs).Error; err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to fetch logs", nil, "")
+	}
+
+	return r.SendEnvelope(map[string]interface{}{
+		"logs":    logs,
+		"session": session,
+	})
+}
+
+// ListFlowRuns returns all sessions (runs) for a specific flow
+func (a *App) ListFlowRuns(r *fastglue.Request) error {
+	orgID, err := a.getOrgID(r)
+	if err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
+	}
+
+	flowID, err := parsePathUUID(r, "id", "flow")
+	if err != nil {
+		return nil
+	}
+
+	// Verify flow belongs to org
+	var flow models.ChatbotFlow
+	if err := a.DB.Where("id = ? AND organization_id = ?", flowID, orgID).First(&flow).Error; err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Flow not found", nil, "")
+	}
+
+	status := string(r.RequestCtx.QueryArgs().Peek("status"))
+
+	// Query sessions that ran this flow via flow logs
+	query := a.DB.Where("organization_id = ? AND current_flow_id = ?", orgID, flowID).
+		Preload("Contact").
+		Order("started_at DESC")
+
+	if status != "" {
+		query = query.Where("status = ?", status)
+	}
+
+	var sessions []models.ChatbotSession
+	if err := query.Limit(100).Find(&sessions).Error; err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to fetch flow runs", nil, "")
+	}
+
+	return r.SendEnvelope(map[string]interface{}{
+		"runs": sessions,
+		"flow": flow,
+	})
+}
+
 // getChatbotStats returns chatbot statistics for an organization
 func (a *App) getChatbotStats(orgID uuid.UUID) ChatbotStatsResponse {
 	var stats ChatbotStatsResponse

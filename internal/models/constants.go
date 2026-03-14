@@ -195,6 +195,24 @@ const (
 	SSOProviderCustom    SSOProviderType = "custom"
 )
 
+// FlowLogEventType represents flow execution log event types
+type FlowLogEventType string
+
+const (
+	FlowLogFlowStarted       FlowLogEventType = "flow_started"
+	FlowLogStepSent          FlowLogEventType = "step_sent"
+	FlowLogInputReceived     FlowLogEventType = "input_received"
+	FlowLogInputValidated    FlowLogEventType = "input_validated"
+	FlowLogInputInvalid      FlowLogEventType = "input_invalid"
+	FlowLogStepSkipped       FlowLogEventType = "step_skipped"
+	FlowLogBranchEvaluated   FlowLogEventType = "branch_evaluated"
+	FlowLogAPICalled         FlowLogEventType = "api_called"
+	FlowLogTransferInitiated FlowLogEventType = "transfer_initiated"
+	FlowLogFlowCompleted     FlowLogEventType = "flow_completed"
+	FlowLogFlowCancelled     FlowLogEventType = "flow_cancelled"
+	FlowLogError             FlowLogEventType = "error"
+)
+
 // TriggerType represents chatbot flow trigger types
 type TriggerType string
 

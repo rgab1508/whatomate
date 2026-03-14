@@ -245,6 +245,21 @@ func (ChatbotSessionMessage) TableName() string {
 	return "chatbot_session_messages"
 }
 
+// ChatbotFlowLog stores step-by-step execution logs for flow sessions
+type ChatbotFlowLog struct {
+	BaseModel
+	SessionID uuid.UUID        `gorm:"type:uuid;index;not null" json:"session_id"`
+	FlowID    uuid.UUID        `gorm:"type:uuid;index;not null" json:"flow_id"`
+	StepName  string           `gorm:"size:100" json:"step_name"`
+	EventType FlowLogEventType `gorm:"size:30;not null;index" json:"event_type"`
+	Message   string           `gorm:"type:text" json:"message"`
+	Data      JSONB            `gorm:"type:jsonb;default:'{}'" json:"data"`
+}
+
+func (ChatbotFlowLog) TableName() string {
+	return "chatbot_flow_logs"
+}
+
 // AIContext provides context data for AI responses
 type AIContext struct {
 	BaseModel

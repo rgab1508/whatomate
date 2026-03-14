@@ -798,6 +798,22 @@ func (a *App) logSessionMessage(sessionID uuid.UUID, direction models.Direction,
 	}
 }
 
+// logFlowEvent records a step-by-step execution event for a flow session
+func (a *App) logFlowEvent(sessionID, flowID uuid.UUID, stepName string, eventType models.FlowLogEventType, message string, data map[string]interface{}) {
+	log := models.ChatbotFlowLog{
+		BaseModel: models.BaseModel{ID: uuid.New()},
+		SessionID: sessionID,
+		FlowID:    flowID,
+		StepName:  stepName,
+		EventType: eventType,
+		Message:   message,
+		Data:      models.JSONB(data),
+	}
+	if err := a.DB.Create(&log).Error; err != nil {
+		a.Log.Error("Failed to log flow event", "error", err, "event_type", eventType)
+	}
+}
+
 // matchFlowTrigger checks if the message triggers any flow
 func (a *App) matchFlowTrigger(orgID uuid.UUID, accountName, messageText string) *models.ChatbotFlow {
 	// Use cached flows (includes steps)
@@ -843,6 +859,11 @@ func (a *App) startFlow(account *models.WhatsAppAccount, session *models.Chatbot
 	session.SessionData["_flow_name"] = flow.Name
 	a.DB.Save(session)
 
+	// Log flow started
+	a.logFlowEvent(session.ID, flow.ID, "", models.FlowLogFlowStarted,
+		fmt.Sprintf("Flow '%s' started", flow.Name),
+		map[string]interface{}{"flow_name": flow.Name, "num_steps": len(flow.Steps), "contact_phone": contact.PhoneNumber})
+
 	// Send initial message if configured
 	if flow.InitialMessage != "" {
 		initialMsg := processTemplate(flow.InitialMessage, a.buildMessageContext(account, session, contact))
@@ -885,6 +906,9 @@ func (a *App) processFlowResponse(account *models.WhatsAppAccount, session *mode
 				a.Log.Error("Failed to send flow cancel message", "error", err, "contact", contact.PhoneNumber)
 			}
 			a.logSessionMessage(session.ID, models.DirectionOutgoing, cancelMsg, "flow_cancel")
+			a.logFlowEvent(session.ID, flow.ID, session.CurrentStep, models.FlowLogFlowCancelled,
+				fmt.Sprintf("Flow cancelled by user input: '%s'", userInput),
+				map[string]interface{}{"cancel_keyword": cancelKw, "user_input": userInput})
 			a.exitFlow(session)
 			return
 		}
@@ -907,6 +931,11 @@ func (a *App) processFlowResponse(account *models.WhatsAppAccount, session *mode
 		return
 	}
 
+	// Log input received
+	a.logFlowEvent(session.ID, flow.ID, currentStep.StepName, models.FlowLogInputReceived,
+		fmt.Sprintf("User input received at step '%s'", currentStep.StepName),
+		map[string]interface{}{"user_input": userInput, "button_id": buttonID})
+
 	// Validate input if required (skip validation for button/list responses)
 	if currentStep.ValidationRegex != "" && buttonID == "" {
 		re, err := regexp.Compile(currentStep.ValidationRegex)
@@ -924,6 +953,9 @@ func (a *App) processFlowResponse(account *models.WhatsAppAccount, session *mode
 					a.Log.Error("Failed to send validation error", "error", err, "contact", contact.PhoneNumber)
 				}
 				a.logSessionMessage(session.ID, models.DirectionOutgoing, errorMsg, currentStep.StepName+"_retry")
+				a.logFlowEvent(session.ID, flow.ID, currentStep.StepName, models.FlowLogInputInvalid,
+					fmt.Sprintf("Invalid input at step '%s' (retry %d/%d)", currentStep.StepName, session.StepRetries, currentStep.MaxRetries),
+					map[string]interface{}{"user_input": userInput, "validation_regex": currentStep.ValidationRegex, "retry": session.StepRetries})
 				return
 			}
 			// Max retries exceeded, continue anyway or exit
@@ -948,6 +980,9 @@ func (a *App) processFlowResponse(account *models.WhatsAppAccount, session *mode
 					a.Log.Error("Failed to send location validation error", "error", err, "contact", contact.PhoneNumber)
 				}
 				a.logSessionMessage(session.ID, models.DirectionOutgoing, errorMsg, currentStep.StepName+"_retry")
+				a.logFlowEvent(session.ID, flow.ID, currentStep.StepName, models.FlowLogInputInvalid,
+					fmt.Sprintf("Invalid location input at step '%s' (retry %d/%d)", currentStep.StepName, session.StepRetries, currentStep.MaxRetries),
+					map[string]interface{}{"user_input": userInput, "retry": session.StepRetries})
 				return
 			}
 			a.Log.Warn("Max retries exceeded for location input", "step", currentStep.StepName)
@@ -1028,6 +1063,15 @@ func (a *App) processFlowResponse(account *models.WhatsAppAccount, session *mode
 		}
 		a.DB.Model(session).Update("session_data", sessionData)
 		session.SessionData = sessionData
+
+		// Log input validated
+		logValue := userInput
+		if buttonID != "" {
+			logValue = buttonID
+		}
+		a.logFlowEvent(session.ID, flow.ID, currentStep.StepName, models.FlowLogInputValidated,
+			fmt.Sprintf("Input stored as '%s' at step '%s'", currentStep.StoreAs, currentStep.StepName),
+			map[string]interface{}{"store_as": currentStep.StoreAs, "value": logValue})
 	}
 
 	// Store WhatsApp Flow response data (from nfm_reply)
@@ -1117,6 +1161,11 @@ func (a *App) processFlowResponse(account *models.WhatsAppAccount, session *mode
 // completeFlow finishes a flow and sends completion message
 func (a *App) completeFlow(account *models.WhatsAppAccount, session *models.ChatbotSession, contact *models.Contact, flow *models.ChatbotFlow) {
 	a.Log.Info("Completing flow", "flow_id", flow.ID, "session_id", session.ID)
+
+	// Log flow completed
+	a.logFlowEvent(session.ID, flow.ID, "", models.FlowLogFlowCompleted,
+		fmt.Sprintf("Flow '%s' completed", flow.Name),
+		map[string]interface{}{"flow_name": flow.Name, "session_data": session.SessionData})
 
 	// Send completion message
 	if flow.CompletionMessage != "" {
@@ -1381,6 +1430,11 @@ func (a *App) sendStepWithSkipCheck(account *models.WhatsAppAccount, session *mo
 		a.Log.Info("Skipping step", "step", step.StepName, "condition", step.SkipCondition)
 		skippedSteps[step.StepName] = true
 
+		// Log step skipped
+		a.logFlowEvent(session.ID, flow.ID, step.StepName, models.FlowLogStepSkipped,
+			fmt.Sprintf("Step '%s' skipped (condition: %s)", step.StepName, step.SkipCondition),
+			map[string]interface{}{"skip_condition": step.SkipCondition})
+
 		// Find next step
 		nextStepName := step.NextStep
 		if nextStepName == "__end__" {
@@ -1498,6 +1552,13 @@ func (a *App) sendStepMessage(account *models.WhatsAppAccount, session *models.C
 
 	a.Log.Debug("sendStepMessage called", "step", step.StepName, "message_type", step.MessageType, "input_config", step.InputConfig)
 
+	// Log step sent
+	if session.CurrentFlowID != nil {
+		a.logFlowEvent(session.ID, *session.CurrentFlowID, step.StepName, models.FlowLogStepSent,
+			fmt.Sprintf("Step '%s' sent (type: %s, input: %s)", step.StepName, step.MessageType, step.InputType),
+			map[string]interface{}{"message_type": string(step.MessageType), "input_type": string(step.InputType)})
+	}
+
 	switch step.MessageType {
 	case models.FlowStepTypeAPIFetch:
 		// Fetch response from external API (may include message + buttons)
@@ -1513,6 +1574,11 @@ func (a *App) sendStepMessage(account *models.WhatsAppAccount, session *models.C
 		apiResp, err := a.fetchApiResponse(step.ApiConfig, session.SessionData, step.Message, account, contact, orgPtr)
 		if err != nil {
 			a.Log.Error("Failed to fetch API response", "error", err, "step", step.StepName)
+			if session.CurrentFlowID != nil {
+				a.logFlowEvent(session.ID, *session.CurrentFlowID, step.StepName, models.FlowLogError,
+					fmt.Sprintf("API call failed at step '%s': %s", step.StepName, err.Error()),
+					map[string]interface{}{"error": err.Error()})
+			}
 			// Use fallback message if configured, otherwise use the step message
 			apiData := msgCtx
 			if fallback, ok := step.ApiConfig["fallback_message"].(string); ok && fallback != "" {
@@ -1527,6 +1593,11 @@ func (a *App) sendStepMessage(account *models.WhatsAppAccount, session *models.C
 			}
 		} else {
 			message = apiResp.Message
+			if session.CurrentFlowID != nil {
+				a.logFlowEvent(session.ID, *session.CurrentFlowID, step.StepName, models.FlowLogAPICalled,
+					fmt.Sprintf("API called successfully at step '%s'", step.StepName),
+					map[string]interface{}{})
+			}
 
 			// Save mapped data to session for future steps
 			if apiResp.MappedData != nil {
@@ -1594,6 +1665,17 @@ func (a *App) sendStepMessage(account *models.WhatsAppAccount, session *models.C
 			if n, ok := step.TransferConfig["notes"].(string); ok {
 				notes = processTemplate(n, msgCtx)
 			}
+		}
+
+		// Log transfer initiated
+		if session.CurrentFlowID != nil {
+			teamIDStr := ""
+			if teamID != nil {
+				teamIDStr = teamID.String()
+			}
+			a.logFlowEvent(session.ID, *session.CurrentFlowID, step.StepName, models.FlowLogTransferInitiated,
+				fmt.Sprintf("Transfer initiated at step '%s'", step.StepName),
+				map[string]interface{}{"team_id": teamIDStr, "notes": notes})
 		}
 
 		// Create the transfer
@@ -2574,6 +2656,11 @@ func (a *App) processBranchStep(account *models.WhatsAppAccount, session *models
 	// Evaluate the condition
 	result := evaluateBranchCondition(varValue, operator, value)
 	a.Log.Info("Branch step evaluated", "step", step.StepName, "variable", variable, "operator", operator, "value", value, "varValue", varValue, "result", result)
+
+	// Log branch evaluated
+	a.logFlowEvent(session.ID, flow.ID, step.StepName, models.FlowLogBranchEvaluated,
+		fmt.Sprintf("Branch '%s': %v %s %s = %v", step.StepName, varValue, operator, value, result),
+		map[string]interface{}{"variable": variable, "operator": operator, "value": value, "var_value": varValue, "result": result})
 
 	// Determine next step based on result
 	branchKey := "false"

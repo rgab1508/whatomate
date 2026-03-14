@@ -271,6 +271,12 @@ export const chatbotService = {
   updateFlow: (id: string, data: any) => api.put(`/chatbot/flows/${id}`, data),
   deleteFlow: (id: string) => api.delete(`/chatbot/flows/${id}`),
 
+  // Flow Runs & Logs
+  listFlowRuns: (flowId: string, params?: { status?: string }) =>
+    api.get(`/chatbot/flows/${flowId}/runs`, { params }),
+  getSessionLogs: (sessionId: string) =>
+    api.get(`/chatbot/sessions/${sessionId}/logs`),
+
   // AI Contexts
   listAIContexts: (params?: { search?: string; page?: number; limit?: number }) =>
     api.get<{ contexts: any[]; total?: number }>('/chatbot/ai-contexts', { params }),

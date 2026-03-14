@@ -86,6 +86,7 @@ func GetMigrationModels() []MigrationModel {
 		{"ChatbotFlowStep", &models.ChatbotFlowStep{}},
 		{"ChatbotSession", &models.ChatbotSession{}},
 		{"ChatbotSessionMessage", &models.ChatbotSessionMessage{}},
+		{"ChatbotFlowLog", &models.ChatbotFlowLog{}},
 		{"AIContext", &models.AIContext{}},
 		{"AgentTransfer", &models.AgentTransfer{}},
 

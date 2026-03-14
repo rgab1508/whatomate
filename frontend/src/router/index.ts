@@ -117,6 +117,18 @@ const router = createRouter({
           meta: { permission: 'flows.chatbot' }
         },
         {
+          path: 'chatbot/flows/:id/runs',
+          name: 'chatbot-flow-runs',
+          component: () => import('@/views/chatbot/FlowRunsView.vue'),
+          meta: { permission: 'flows.chatbot' }
+        },
+        {
+          path: 'chatbot/flows/:id/runs/:runId',
+          name: 'chatbot-flow-run-logs',
+          component: () => import('@/views/chatbot/FlowRunLogsView.vue'),
+          meta: { permission: 'flows.chatbot' }
+        },
+        {
           path: 'chatbot/ai',
           name: 'chatbot-ai',
           component: () => import('@/views/chatbot/AIContextsView.vue'),

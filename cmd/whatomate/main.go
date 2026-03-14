@@ -711,6 +711,10 @@ func setupRoutes(g *fastglue.Fastglue, app *handlers.App, lo logf.Logger, basePa
 	// Sessions (admin/debug)
 	g.GET("/api/chatbot/sessions", app.ListChatbotSessions)
 	g.GET("/api/chatbot/sessions/{id}", app.GetChatbotSession)
+	g.GET("/api/chatbot/sessions/{id}/logs", app.GetSessionFlowLogs)
+
+	// Flow runs
+	g.GET("/api/chatbot/flows/{id}/runs", app.ListFlowRuns)
 
 	// Analytics
 	g.GET("/api/analytics/dashboard", app.GetDashboardStats)

@@ -29,6 +29,9 @@ This fork adds the following features on top of upstream Whatomate:
 - **Marketing Messages API (MM Lite)**
   Support for Meta's Marketing Messages API endpoint (`/marketing_messages`) for optimized marketing template delivery. Available for both bulk campaigns (toggle in campaign settings) and individual template messages via the API.
 
+- **Flow Run Logs**
+  Step-by-step execution logs for every chatbot flow session. See exactly what happened to each contact: which steps were sent, what input was received, validation results, branch decisions, API calls, and errors. Accessible via the Activity icon on each flow in the flows list, or via API at `GET /api/chatbot/sessions/{id}/logs` and `GET /api/chatbot/flows/{id}/runs`.
+
 ![Dashboard](docs/public/images/dashboard-light.png#gh-light-mode-only)
 ![Dashboard](docs/public/images/dashboard-dark.png#gh-dark-mode-only)
 
