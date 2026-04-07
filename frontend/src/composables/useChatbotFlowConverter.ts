@@ -75,6 +75,7 @@ export function stepsToNodesAndEdges(steps: FlowStep[], canvasLayout?: CanvasLay
         label: step.step_name,
         config: { ...step },
         isEntryNode: index === 0,
+        index,
       },
     }
   })

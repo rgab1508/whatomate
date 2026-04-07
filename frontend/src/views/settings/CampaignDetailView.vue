@@ -94,6 +94,7 @@ interface Campaign {
   scheduled_at?: string
   started_at?: string
   completed_at?: string
+  use_mm_api?: boolean
   created_by_name?: string
   updated_by_name?: string
   created_at: string
@@ -150,6 +151,7 @@ const form = ref({
   whatsapp_account: '',
   template_id: '',
   scheduled_at: '',
+  use_mm_api: false,
 })
 
 const breadcrumbs = computed(() => [
@@ -352,6 +354,7 @@ function syncForm() {
     whatsapp_account: campaign.value.whatsapp_account || '',
     template_id: campaign.value.template_id || '',
     scheduled_at: campaign.value.scheduled_at ? campaign.value.scheduled_at.slice(0, 16) : '',
+    use_mm_api: !!campaign.value.use_mm_api,
   }
 }
 
@@ -397,6 +400,7 @@ async function save() {
       whatsapp_account: form.value.whatsapp_account || undefined,
       template_id: form.value.template_id || undefined,
       scheduled_at: form.value.scheduled_at || undefined,
+      use_mm_api: form.value.use_mm_api,
     }
     if (isNew.value) {
       const response = await campaignsService.create(payload)
@@ -940,6 +944,21 @@ onUnmounted(() => {
               </SelectItem>
             </SelectContent>
           </Select>
+        </div>
+
+        <div class="flex items-center space-x-2 py-2">
+          <Checkbox id="use_mm_api" v-model:checked="form.use_mm_api" :disabled="!isDraft" />
+          <div class="grid gap-1.5 leading-none">
+            <label
+              for="use_mm_api"
+              class="text-xs font-medium leading-none peer-disabled:cursor-not-allowed peer-disabled:opacity-70"
+            >
+              {{ $t('campaigns.useMMAPI', 'Use Marketing Messages API') }}
+            </label>
+            <p class="text-[10px] text-muted-foreground">
+              {{ $t('campaigns.useMMAPIDesc', 'Send using the Cloud API Marketing Messages Lite.') }}
+            </p>
+          </div>
         </div>
 
         <!-- Media Upload Section -->

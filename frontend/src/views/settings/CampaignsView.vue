@@ -323,7 +323,10 @@ function getProgressPercentage(campaign: Campaign): number {
                 @page-change="handlePageChange"
               >
                 <template #cell-name="{ item: campaign }">
-                  <RouterLink :to="`/campaigns/${campaign.id}`" class="font-medium text-inherit no-underline hover:opacity-80">{{ campaign.name }}</RouterLink>
+                  <div class="flex flex-col">
+                    <RouterLink :to="`/campaigns/${campaign.id}`" class="font-medium text-inherit no-underline hover:opacity-80">{{ campaign.name }}</RouterLink>
+                    <span v-if="campaign.use_mm_api" class="text-[10px] text-blue-500 font-medium uppercase tracking-wider mt-0.5">MM API</span>
+                  </div>
                 </template>
                 <template #cell-template="{ item: campaign }">
                   <span class="text-sm text-muted-foreground">{{ campaign.template_name || '—' }}</span>

@@ -424,6 +424,10 @@ function onEdgeRemove(edges: Edge[]) {
           <Play class="h-4 w-4 mr-1" />
           Preview
         </Button>
+        <Button variant="outline" size="sm" @click="emit('addStep')">
+          <Plus class="h-4 w-4 mr-1" />
+          Add Step
+        </Button>
       </div>
     </div>
 
@@ -447,7 +451,7 @@ function onEdgeRemove(edges: Edge[]) {
     </div>
 
     <!-- Vue Flow Canvas -->
-    <div class="flex-1">
+    <div class="flex-1 relative">
       <FlowCanvas
         :nodes="flowNodes"
         :edges="flowEdges"
@@ -469,13 +473,13 @@ function onEdgeRemove(edges: Edge[]) {
       <!-- Empty state overlay -->
       <div
         v-if="steps.length === 0"
-        class="absolute inset-0 flex items-center justify-center pointer-events-none"
+        class="absolute inset-0 flex items-center justify-center pointer-events-none z-10"
       >
         <div
-          class="w-72 py-12 rounded-xl border-2 border-dashed border-muted-foreground/30 flex flex-col items-center justify-center cursor-pointer hover:border-primary hover:bg-primary/5 transition-all pointer-events-auto"
+          class="w-72 py-12 rounded-xl border-2 border-dashed border-gray-300 dark:border-gray-600 flex flex-col items-center justify-center cursor-pointer hover:border-primary hover:bg-primary/5 transition-all pointer-events-auto shadow-sm bg-white/50 dark:bg-black/20"
           @click="emit('addStep')"
         >
-          <Plus class="h-10 w-10 text-muted-foreground mb-3" />
+          <Plus class="h-10 w-10 text-gray-400 mb-3" />
           <span class="text-sm font-medium text-muted-foreground">Add your first step</span>
         </div>
       </div>

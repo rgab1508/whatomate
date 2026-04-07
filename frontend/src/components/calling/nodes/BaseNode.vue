@@ -75,7 +75,8 @@ const headerGradient = computed(() => gradientMap[props.headerClass] || props.he
     <!-- Header -->
     <div :class="['px-3 py-2 rounded-t-lg text-white text-xs font-semibold flex items-center gap-2 overflow-hidden bg-gradient-to-r', headerGradient]">
       <slot name="icon" />
-      <span class="truncate">{{ label }}</span>
+      <span class="truncate flex-1">{{ label }}</span>
+      <span v-if="data?.index !== undefined" class="opacity-70 text-[10px] bg-white/20 px-1.5 rounded-full">{{ data.index + 1 }}</span>
     </div>
 
     <!-- Body -->
