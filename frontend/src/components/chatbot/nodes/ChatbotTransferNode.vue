@@ -22,7 +22,7 @@ const notes = computed(() => {
 </script>
 
 <template>
-  <BaseNode :label="data?.label || 'Transfer'" header-class="bg-amber-600" :output-handles="[]" :has-input="!data?.isEntryNode">
+  <BaseNode :label="data?.label || 'Transfer'" header-class="bg-amber-600" :output-handles="[]" :has-input="!data?.isEntryNode" :data="data">
     <template #icon><UserPlus class="w-4 h-4" /></template>
     <div>
       <p class="font-medium truncate" :title="teamLabel">→ {{ teamLabel }}</p>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch, markRaw, nextTick } from 'vue'
+import { ref, watch, markRaw, nextTick, computed } from 'vue'
 import { useVueFlow, MarkerType } from '@vue-flow/core'
 import type { Node, Edge, NodeMouseEvent, Connection } from '@vue-flow/core'
 import { Button } from '@/components/ui/button'
@@ -25,6 +25,8 @@ import ChatbotButtonsNode from '@/components/chatbot/nodes/ChatbotButtonsNode.vu
 import ChatbotApiNode from '@/components/chatbot/nodes/ChatbotApiNode.vue'
 import ChatbotWhatsAppFlowNode from '@/components/chatbot/nodes/ChatbotWhatsAppFlowNode.vue'
 import ChatbotTransferNode from '@/components/chatbot/nodes/ChatbotTransferNode.vue'
+import ChatbotBranchNode from '@/components/chatbot/nodes/ChatbotBranchNode.vue'
+import ChatbotEndNode from '@/components/chatbot/nodes/ChatbotEndNode.vue'
 
 interface FlowChartStep {
   step_name: string
@@ -65,6 +67,7 @@ const messageTypePalette = [
   { type: 'api_fetch', label: 'API Fetch', icon: Globe, color: 'bg-orange-600' },
   { type: 'whatsapp_flow', label: 'WA Flow', icon: MessageCircle, color: 'bg-green-600' },
   { type: 'transfer', label: 'Transfer', icon: UserPlus, color: 'bg-amber-600' },
+  { type: 'branch', label: 'Branch', icon: GitMerge, color: 'bg-cyan-600' },
 ]
 
 // Track which step is selected on the canvas (index)
@@ -83,6 +86,8 @@ const nodeTypes: Record<string, any> = {
   chatbot_api_fetch: markRaw(ChatbotApiNode),
   chatbot_whatsapp_flow: markRaw(ChatbotWhatsAppFlowNode),
   chatbot_transfer: markRaw(ChatbotTransferNode),
+  chatbot_branch: markRaw(ChatbotBranchNode),
+  chatbot_end: markRaw(ChatbotEndNode),
 }
 
 const flowNodes = ref<Node[]>([])
@@ -91,6 +96,148 @@ const flowEdges = ref<Edge[]>([])
 let skipNextRebuild = false
 
 const { fitView } = useVueFlow()
+
+// --- Flow Validation Logic ---
+const reachableSteps = computed(() => {
+  const steps = props.steps || []
+  if (steps.length === 0) return new Set<number>()
+
+  const reachable = new Set<number>()
+  reachable.add(0)
+
+  const queue = [0]
+  const stepNameSet = new Set(steps.map((s) => s.step_name))
+
+  while (queue.length > 0) {
+    const currentIdx = queue.shift()!
+    const step = steps[currentIdx]
+    if (!step) continue
+
+    if (step.message_type === 'transfer') continue
+
+    const targets: string[] = []
+    if (step.message_type === 'branch' && step.conditional_next) {
+      if (step.conditional_next.true) targets.push(step.conditional_next.true)
+      if (step.conditional_next.false) targets.push(step.conditional_next.false)
+    } else if (step.message_type === 'buttons' && step.conditional_next) {
+      Object.values(step.conditional_next).forEach((t) => {
+        if (t) targets.push(t)
+      })
+    }
+
+    if (targets.length > 0) {
+      targets.forEach((targetName) => {
+        const idx = steps.findIndex((s) => s.step_name === targetName)
+        if (idx !== -1 && !reachable.has(idx)) {
+          reachable.add(idx)
+          queue.push(idx)
+        }
+      })
+    } else {
+      // Fallback
+      if (step.next_step && step.next_step !== '__end__') {
+        const idx = steps.findIndex((s) => s.step_name === step.next_step)
+        if (idx !== -1 && !reachable.has(idx)) {
+          reachable.add(idx)
+          queue.push(idx)
+        }
+      } else if (!step.next_step && currentIdx + 1 < steps.length) {
+        if (!reachable.has(currentIdx + 1)) {
+          reachable.add(currentIdx + 1)
+          queue.push(currentIdx + 1)
+        }
+      }
+    }
+  }
+  return reachable
+})
+
+const stepsInLoop = computed(() => {
+  const steps = props.steps || []
+  const inLoop = new Set<number>()
+  const reachable = reachableSteps.value
+
+  for (const startIdx of reachable) {
+    const visited = new Set<number>()
+    const path: number[] = []
+
+    const dfs = (currentIdx: number): boolean => {
+      if (path.includes(currentIdx)) {
+        const cycleStart = path.indexOf(currentIdx)
+        for (let i = cycleStart; i < path.length; i++) inLoop.add(path[i])
+        return true
+      }
+      if (visited.has(currentIdx)) return false
+      visited.add(currentIdx)
+      path.push(currentIdx)
+
+      const step = steps[currentIdx]
+      if (!step || step.message_type === 'transfer') {
+        path.pop()
+        return false
+      }
+
+      const targets: string[] = []
+      if (step.message_type === 'branch' && step.conditional_next) {
+        if (step.conditional_next.true) targets.push(step.conditional_next.true)
+        if (step.conditional_next.false) targets.push(step.conditional_next.false)
+      } else if (step.message_type === 'buttons' && step.conditional_next) {
+        Object.values(step.conditional_next).forEach((t) => {
+          if (t) targets.push(t)
+        })
+      }
+
+      if (targets.length > 0) {
+        targets.forEach((targetName) => {
+          const idx = steps.findIndex((s) => s.step_name === targetName)
+          if (idx !== -1) dfs(idx)
+        })
+      } else {
+        if (step.next_step && step.next_step !== '__end__') {
+          const idx = steps.findIndex((s) => s.step_name === step.next_step)
+          if (idx !== -1) dfs(idx)
+        } else if (!step.next_step && currentIdx + 1 < steps.length) {
+          dfs(currentIdx + 1)
+        }
+      }
+
+      path.pop()
+      return false
+    }
+    dfs(startIdx)
+  }
+  return inLoop
+})
+
+// Check if END is reachable (no infinite loop)
+const isEndReachable = computed(() => {
+  const steps = props.steps || []
+  if (steps.length === 0) return true
+  const reachable = reachableSteps.value
+
+  for (const stepIdx of reachable) {
+    const step = steps[stepIdx]
+    if (!step) continue
+    if (step.message_type === 'transfer') return true
+
+    const targets: string[] = []
+    if (step.message_type === 'branch' && step.conditional_next) {
+      if (step.conditional_next.true === '__end__') return true
+      if (step.conditional_next.false === '__end__') return true
+      if (step.conditional_next.true) targets.push(step.conditional_next.true)
+      if (step.conditional_next.false) targets.push(step.conditional_next.false)
+    } else if (step.message_type === 'buttons' && step.conditional_next) {
+      if (Object.values(step.conditional_next).includes('__end__')) return true
+      Object.values(step.conditional_next).forEach((t) => { if (t) targets.push(t) })
+    }
+
+    if (targets.length === 0) {
+      if (step.next_step === '__end__') return true
+      if (!step.next_step && stepIdx === steps.length - 1) return true
+    }
+  }
+  return false
+})
 
 function rebuildGraph() {
   if (skipNextRebuild) {
@@ -121,13 +268,36 @@ function rebuildGraph() {
     }
   })
 
-  // Mark selected
+  // Mark selected and add validation status
   const sorted = [...steps].sort((a, b) => a.step_order - b.step_order)
+  const reachable = reachableSteps.value
+  const inLoop = stepsInLoop.value
+
   n.forEach((node) => {
     const stepIdx = sorted.findIndex((s) => s.step_name === node.id)
+    if (node.id === '__end__') {
+      node.data = {
+        ...node.data,
+        isUnreachable: !isEndReachable.value,
+        somePathsLoop: inLoop.size > 0 && isEndReachable.value,
+      }
+      return
+    }
     const isSelected = props.selectedStepIndex !== null && stepIdx === props.selectedStepIndex
-    node.data = { ...node.data, selected: isSelected }
-    node.class = isSelected ? 'selected-node' : ''
+    const isUnreachable = stepIdx > 0 && !reachable.has(stepIdx)
+    const isInLoop = inLoop.has(stepIdx)
+
+    node.data = {
+      ...node.data,
+      selected: isSelected,
+      isUnreachable,
+      isInLoop,
+    }
+    node.class = [
+      isSelected ? 'selected-node' : '',
+      isUnreachable ? 'unreachable-node' : '',
+      isInLoop ? 'loop-node' : '',
+    ].filter(Boolean).join(' ')
   })
 
   flowNodes.value = n
@@ -138,18 +308,34 @@ function rebuildGraph() {
 // Rebuild when steps change
 watch(() => props.steps, rebuildGraph, { immediate: true, deep: true })
 
-// Update selection highlight
+// Update selection highlight and validation status
 watch(
-  () => props.selectedStepIndex,
-  (idx) => {
-    const sorted = [...(props.steps || [])].sort((a, b) => a.step_order - b.step_order)
+  () => [props.selectedStepIndex, props.steps],
+  ([idx]) => {
+    const steps = props.steps || []
+    const sorted = [...steps].sort((a, b) => a.step_order - b.step_order)
+    const reachable = reachableSteps.value
+    const inLoop = stepsInLoop.value
+
     flowNodes.value = flowNodes.value.map((node) => {
       const stepIdx = sorted.findIndex((s) => s.step_name === node.id)
       const isSelected = idx !== null && stepIdx === idx
+      const isUnreachable = stepIdx > 0 && !reachable.has(stepIdx)
+      const isInLoop = inLoop.has(stepIdx)
+
       return {
         ...node,
-        data: { ...node.data, selected: isSelected },
-        class: isSelected ? 'selected-node' : '',
+        data: {
+          ...node.data,
+          selected: isSelected,
+          isUnreachable,
+          isInLoop,
+        },
+        class: [
+          isSelected ? 'selected-node' : '',
+          isUnreachable ? 'unreachable-node' : '',
+          isInLoop ? 'loop-node' : '',
+        ].filter(Boolean).join(' '),
       }
     })
   },

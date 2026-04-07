@@ -252,7 +252,7 @@ func (w *Worker) sendTemplateMessage(ctx context.Context, account *models.WhatsA
 	waAccount := account.ToWAAccount()
 
 	// Build template components with parameters
-	var components []map[string]interface{}
+	var components []map[string]any
 
 	// Handle header component (for media templates)
 	if template.HeaderType != "" && template.HeaderType != "TEXT" {
@@ -260,27 +260,27 @@ func (w *Worker) sendTemplateMessage(ctx context.Context, account *models.WhatsA
 		if campaignHeaderMediaID != "" {
 			headerParam := buildMediaParameter(template.HeaderType, "id", campaignHeaderMediaID)
 			if headerParam != nil {
-				components = append(components, map[string]interface{}{
+				components = append(components, map[string]any{
 					"type":       "header",
-					"parameters": []map[string]interface{}{headerParam},
+					"parameters": []map[string]any{headerParam},
 				})
 			}
 		} else if template.HeaderMediaID != "" {
 			// Fall back to template's stored media ID
 			headerParam := buildMediaParameter(template.HeaderType, "id", template.HeaderMediaID)
 			if headerParam != nil {
-				components = append(components, map[string]interface{}{
+				components = append(components, map[string]any{
 					"type":       "header",
-					"parameters": []map[string]interface{}{headerParam},
+					"parameters": []map[string]any{headerParam},
 				})
 			}
 		} else if template.HeaderContent != "" {
 			// Fall back to template's header content (URL)
 			headerParam := buildMediaParameter(template.HeaderType, "link", template.HeaderContent)
 			if headerParam != nil {
-				components = append(components, map[string]interface{}{
+				components = append(components, map[string]any{
 					"type":       "header",
-					"parameters": []map[string]interface{}{headerParam},
+					"parameters": []map[string]any{headerParam},
 				})
 			}
 		}
@@ -299,7 +299,7 @@ func (w *Worker) sendTemplateMessage(ctx context.Context, account *models.WhatsA
 	}
 
 	// Use the shared component builder (same as chat template sending)
-	components := whatsapp.BuildTemplateComponents(bodyParams, template.HeaderType, campaignHeaderMediaID)
+	components = whatsapp.BuildTemplateComponents(bodyParams, template.HeaderType, campaignHeaderMediaID)
 	// Add auto-generated button components (Flow needs flow_token)
 	flowComponents := whatsapp.AutoButtonComponents(template.Buttons)
 	components = append(components, flowComponents...)
@@ -312,31 +312,31 @@ func (w *Worker) sendTemplateMessage(ctx context.Context, account *models.WhatsA
 func (w *Worker) sendMarketingTemplateMessage(ctx context.Context, account *models.WhatsAppAccount, template *models.Template, recipient *models.BulkMessageRecipient, campaignHeaderMediaID string) (string, error) {
 	waAccount := account.ToWAAccount()
 
-	var components []map[string]interface{}
+	var components []map[string]any
 
 	if template.HeaderType != "" && template.HeaderType != "TEXT" {
 		if campaignHeaderMediaID != "" {
 			headerParam := buildMediaParameter(template.HeaderType, "id", campaignHeaderMediaID)
 			if headerParam != nil {
-				components = append(components, map[string]interface{}{
+				components = append(components, map[string]any{
 					"type":       "header",
-					"parameters": []map[string]interface{}{headerParam},
+					"parameters": []map[string]any{headerParam},
 				})
 			}
 		} else if template.HeaderMediaID != "" {
 			headerParam := buildMediaParameter(template.HeaderType, "id", template.HeaderMediaID)
 			if headerParam != nil {
-				components = append(components, map[string]interface{}{
+				components = append(components, map[string]any{
 					"type":       "header",
-					"parameters": []map[string]interface{}{headerParam},
+					"parameters": []map[string]any{headerParam},
 				})
 			}
 		} else if template.HeaderContent != "" {
 			headerParam := buildMediaParameter(template.HeaderType, "link", template.HeaderContent)
 			if headerParam != nil {
-				components = append(components, map[string]interface{}{
+				components = append(components, map[string]any{
 					"type":       "header",
-					"parameters": []map[string]interface{}{headerParam},
+					"parameters": []map[string]any{headerParam},
 				})
 			}
 		}
@@ -344,14 +344,14 @@ func (w *Worker) sendMarketingTemplateMessage(ctx context.Context, account *mode
 
 	resolvedParams := templateutil.ResolveParams(template.BodyContent, recipient.TemplateParams)
 	if len(resolvedParams) > 0 {
-		bodyParams := make([]map[string]interface{}, len(resolvedParams))
+		bodyParams := make([]map[string]any, len(resolvedParams))
 		for i, val := range resolvedParams {
-			bodyParams[i] = map[string]interface{}{
+			bodyParams[i] = map[string]any{
 				"type": "text",
 				"text": val,
 			}
 		}
-		components = append(components, map[string]interface{}{
+		components = append(components, map[string]any{
 			"type":       "body",
 			"parameters": bodyParams,
 		})
@@ -362,7 +362,7 @@ func (w *Worker) sendMarketingTemplateMessage(ctx context.Context, account *mode
 
 // buildMediaParameter creates a media parameter for WhatsApp template headers.
 // keyName is "id" for Meta media IDs or "link" for external URLs.
-func buildMediaParameter(headerType, keyName, value string) map[string]interface{} {
+func buildMediaParameter(headerType, keyName, value string) map[string]any {
 	var mediaType string
 	switch headerType {
 	case "IMAGE":
@@ -374,9 +374,9 @@ func buildMediaParameter(headerType, keyName, value string) map[string]interface
 	default:
 		return nil
 	}
-	return map[string]interface{}{
+	return map[string]any{
 		"type": mediaType,
-		mediaType: map[string]interface{}{
+		mediaType: map[string]any{
 			keyName: value,
 		},
 	}

@@ -26,21 +26,39 @@ export function stepsToNodesAndEdges(steps: FlowStep[], canvasLayout?: CanvasLay
 
   // Build a set of step names that are targeted by non-sequential jumps (for offset)
   const nonSequentialTargets = new Set<string>()
+  const explicitEndSources = new Set<string>()
+
   sorted.forEach((step, index) => {
     const nextSequentialName = index < sorted.length - 1 ? sorted[index + 1].step_name : null
 
     if (step.message_type === 'buttons' && step.conditional_next) {
       for (const targetStep of Object.values(step.conditional_next)) {
-        if (targetStep && targetStep !== nextSequentialName) {
+        if (targetStep === '__end__') {
+          explicitEndSources.add(step.step_name)
+        } else if (targetStep && targetStep !== nextSequentialName) {
+          nonSequentialTargets.add(targetStep)
+        }
+      }
+    } else if (step.message_type === 'branch' && step.conditional_next) {
+      for (const targetStep of Object.values(step.conditional_next)) {
+        if (targetStep === '__end__') {
+          explicitEndSources.add(step.step_name)
+        } else if (targetStep && targetStep !== nextSequentialName) {
           nonSequentialTargets.add(targetStep)
         }
       }
     } else if (step.message_type !== 'transfer' && step.next_step) {
-      if (step.next_step !== nextSequentialName) {
+      if (step.next_step === '__end__') {
+        explicitEndSources.add(step.step_name)
+      } else if (step.next_step !== nextSequentialName) {
         nonSequentialTargets.add(step.next_step)
       }
     }
   })
+
+  // Check if we need an explicit END node
+  const needsEndNode = explicitEndSources.size > 0 ||
+    sorted[sorted.length - 1].message_type !== 'transfer'
 
   // Create nodes
   const savedPositions = canvasLayout?.node_positions || {}
@@ -52,7 +70,7 @@ export function stepsToNodesAndEdges(steps: FlowStep[], canvasLayout?: CanvasLay
       type: getNodeType(step.message_type),
       position: saved
         ? { x: saved.x, y: saved.y }
-        : { x: isNonSequentialTarget ? 500 : 300, y: index * 150 },
+        : { x: isNonSequentialTarget ? 500 : 300, y: index * 200 },
       data: {
         label: step.step_name,
         config: { ...step },
@@ -61,12 +79,23 @@ export function stepsToNodesAndEdges(steps: FlowStep[], canvasLayout?: CanvasLay
     }
   })
 
+  if (needsEndNode) {
+    const saved = savedPositions['__end__']
+    nodes.push({
+      id: '__end__',
+      type: 'chatbot_end',
+      position: saved || { x: 300, y: sorted.length * 200 },
+      data: { label: 'End' }
+    })
+  }
+
   // Create edges
   const edges: Edge[] = []
   const stepNameSet = new Set(sorted.map((s) => s.step_name))
+  if (needsEndNode) stepNameSet.add('__end__')
 
   sorted.forEach((step, index) => {
-    const nextSequentialStep = index < sorted.length - 1 ? sorted[index + 1].step_name : null
+    const nextSequentialStep = index < sorted.length - 1 ? sorted[index + 1].step_name : (needsEndNode ? '__end__' : null)
 
     if (step.message_type === 'transfer') {
       // Terminal node -- no outgoing edges
@@ -115,6 +144,34 @@ export function stepsToNodesAndEdges(steps: FlowStep[], canvasLayout?: CanvasLay
               markerEnd: MarkerType.ArrowClosed,
             })
           }
+        }
+      }
+    } else if (step.message_type === 'branch') {
+      const conditionalNext = step.conditional_next || {}
+      const branchPaths = ['true', 'false']
+
+      for (const path of branchPaths) {
+        const targetStep = conditionalNext[path]
+        if (targetStep && stepNameSet.has(targetStep)) {
+          edges.push({
+            id: `e-${step.step_name}-${targetStep}-${path}`,
+            source: step.step_name,
+            target: targetStep,
+            sourceHandle: path,
+            label: path.charAt(0).toUpperCase() + path.slice(1),
+            animated: true,
+            markerEnd: MarkerType.ArrowClosed,
+          })
+        } else if (nextSequentialStep) {
+          edges.push({
+            id: `e-${step.step_name}-${nextSequentialStep}-${path}`,
+            source: step.step_name,
+            target: nextSequentialStep,
+            sourceHandle: path,
+            label: path.charAt(0).toUpperCase() + path.slice(1),
+            animated: true,
+            markerEnd: MarkerType.ArrowClosed,
+          })
         }
       }
     } else if (step.next_step && stepNameSet.has(step.next_step)) {

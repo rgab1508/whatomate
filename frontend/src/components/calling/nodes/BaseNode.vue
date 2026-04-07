@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { Handle, Position } from '@vue-flow/core'
+import { AlertTriangle } from 'lucide-vue-next'
 
 const props = withDefaults(
   defineProps<{
@@ -8,6 +9,7 @@ const props = withDefaults(
     headerClass: string
     hasInput?: boolean
     outputHandles?: { id: string; label: string; title?: string }[]
+    data?: any
   }>(),
   { hasInput: true },
 )
@@ -27,7 +29,39 @@ const headerGradient = computed(() => gradientMap[props.headerClass] || props.he
 </script>
 
 <template>
-  <div class="base-node relative bg-background border rounded-lg shadow-md hover:shadow-lg min-w-48 w-max max-w-sm overflow-visible transition-shadow duration-200">
+  <div
+    :class="[
+      'base-node relative bg-background border rounded-lg shadow-md hover:shadow-lg min-w-48 w-max max-w-sm overflow-visible transition-shadow duration-200',
+      data?.isUnreachable ? 'border-red-400 bg-red-50 dark:bg-red-900/20 opacity-80' : '',
+      data?.isInLoop ? 'border-amber-400 bg-amber-50 dark:bg-amber-900/20' : '',
+    ]"
+  >
+    <!-- Loop Warning Badge -->
+    <div
+      v-if="data?.isInLoop && !data?.isUnreachable"
+      class="absolute -top-3 left-1/2 -translate-x-1/2 bg-amber-500 text-white text-[10px] font-bold px-3 py-1 rounded-full flex items-center gap-1 shadow-md z-[20]"
+    >
+      <svg class="h-3 w-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M21 12a9 9 0 1 1-6.219-8.56" />
+      </svg>
+      LOOP
+    </div>
+    <!-- Unreachable Warning Badge -->
+    <div
+      v-if="data?.isUnreachable"
+      class="absolute -top-3 left-1/2 -translate-x-1/2 bg-red-500 text-white text-[10px] font-bold px-3 py-1 rounded-full flex items-center gap-1 shadow-md z-[20]"
+    >
+      <AlertTriangle class="h-3 w-3" />
+      UNREACHABLE
+    </div>
+    <!-- Entry Node Badge -->
+    <div
+      v-if="data?.isEntryNode"
+      class="absolute -top-3 left-1/2 -translate-x-1/2 bg-green-500 text-white text-[10px] font-bold px-3 py-1 rounded-full flex items-center gap-1 shadow-md z-[20]"
+    >
+      START
+    </div>
+
     <!-- Input handle (top) -->
     <Handle
       v-if="hasInput !== false"

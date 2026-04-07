@@ -19,7 +19,7 @@ const outputHandles = computed(() => {
 </script>
 
 <template>
-  <BaseNode :label="data?.label || 'Buttons'" header-class="bg-purple-600" :output-handles="outputHandles" :has-input="!data?.isEntryNode">
+  <BaseNode :label="data?.label || 'Buttons'" header-class="bg-purple-600" :output-handles="outputHandles" :has-input="!data?.isEntryNode" :data="data">
     <template #icon><MousePointerClick class="w-4 h-4" /></template>
     <div v-if="buttons.length > 0" class="space-y-0.5">
       <div v-for="(btn, idx) in buttons" :key="btn.id" class="flex gap-1" :title="btn.title">
