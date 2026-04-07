@@ -75,6 +75,7 @@ const (
 	ResourceIVRFlows        = "ivr_flows"
 	ResourceCallTransfers   = "call_transfers"
 	ResourceOutgoingCalls   = "outgoing_calls"
+	ResourceAuditLogs       = "audit_logs"
 )
 
 // PermissionAction constants for available actions
@@ -151,6 +152,7 @@ func DefaultPermissions() []Permission {
 		// Chatbot AI
 		{Resource: ResourceChatbotAI, Action: ActionRead, Description: "View AI contexts"},
 		{Resource: ResourceChatbotAI, Action: ActionWrite, Description: "Create and edit AI contexts"},
+		{Resource: ResourceChatbotAI, Action: ActionDelete, Description: "Delete AI contexts"},
 
 		// Chat
 		{Resource: ResourceChat, Action: ActionRead, Description: "View chat conversations"},
@@ -221,6 +223,9 @@ func DefaultPermissions() []Permission {
 		// Outgoing Calls
 		{Resource: ResourceOutgoingCalls, Action: ActionRead, Description: "View outgoing call status"},
 		{Resource: ResourceOutgoingCalls, Action: ActionWrite, Description: "Initiate outgoing calls"},
+
+		// Audit Logs
+		{Resource: ResourceAuditLogs, Action: ActionRead, Description: "View audit logs"},
 	}
 }
 
@@ -249,7 +254,7 @@ func SystemRolePermissions() map[string][]string {
 		"campaigns:read", "campaigns:write", "campaigns:delete", "campaigns:execute",
 		// Chatbot
 		"chatbot.keywords:read", "chatbot.keywords:write", "chatbot.keywords:delete",
-		"chatbot.ai:read", "chatbot.ai:write",
+		"chatbot.ai:read", "chatbot.ai:write", "chatbot.ai:delete",
 		// Chat
 		"chat:read", "chat:write", "chat.assign:write",
 		// Contacts

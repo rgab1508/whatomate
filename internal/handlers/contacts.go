@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/shridarpatil/whatomate/internal/models"
+	"github.com/shridarpatil/whatomate/internal/utils"
 	"github.com/shridarpatil/whatomate/pkg/whatsapp"
 	"github.com/valyala/fasthttp"
 	"github.com/zerodha/fastglue"
@@ -166,8 +167,8 @@ func (a *App) ListContacts(r *fastglue.Request) error {
 		phoneNumber := c.PhoneNumber
 		profileName := c.ProfileName
 		if shouldMask {
-			phoneNumber = MaskPhoneNumber(phoneNumber)
-			profileName = MaskIfPhoneNumber(profileName)
+			phoneNumber = utils.MaskPhoneNumber(phoneNumber)
+			profileName = utils.MaskIfPhoneNumber(profileName)
 		}
 
 		serviceWindowOpen := c.LastInboundAt != nil && time.Since(*c.LastInboundAt) < 24*time.Hour
@@ -243,8 +244,8 @@ func (a *App) GetContact(r *fastglue.Request) error {
 	profileName := contact.ProfileName
 	shouldMask := a.ShouldMaskPhoneNumbers(orgID)
 	if shouldMask {
-		phoneNumber = MaskPhoneNumber(phoneNumber)
-		profileName = MaskIfPhoneNumber(profileName)
+		phoneNumber = utils.MaskPhoneNumber(phoneNumber)
+		profileName = utils.MaskIfPhoneNumber(profileName)
 	}
 
 	response := ContactResponse{
@@ -440,9 +441,9 @@ func (a *App) buildMessagesResponse(messages []models.Message) []MessageResponse
 
 		if m.Metadata != nil {
 			if reactionsRaw, ok := m.Metadata["reactions"]; ok {
-				if reactionsArray, ok := reactionsRaw.([]interface{}); ok {
+				if reactionsArray, ok := reactionsRaw.([]any); ok {
 					for _, r := range reactionsArray {
-						if rMap, ok := r.(map[string]interface{}); ok {
+						if rMap, ok := r.(map[string]any); ok {
 							emoji, _ := rMap["emoji"].(string)
 							fromPhone, _ := rMap["from_phone"].(string)
 							fromUser, _ := rMap["from_user"].(string)
@@ -927,11 +928,11 @@ func (a *App) SendReaction(r *fastglue.Request) error {
 	}
 
 	// Parse existing reactions from Metadata
-	var metadata map[string]interface{}
+	var metadata map[string]any
 	if message.Metadata != nil {
 		metadata = message.Metadata
 	} else {
-		metadata = make(map[string]interface{})
+		metadata = make(map[string]any)
 	}
 
 	// Get or initialize reactions array
@@ -942,9 +943,9 @@ func (a *App) SendReaction(r *fastglue.Request) error {
 	}
 	var reactions []Reaction
 	if reactionsRaw, ok := metadata["reactions"]; ok {
-		if reactionsArray, ok := reactionsRaw.([]interface{}); ok {
+		if reactionsArray, ok := reactionsRaw.([]any); ok {
 			for _, r := range reactionsArray {
-				if rMap, ok := r.(map[string]interface{}); ok {
+				if rMap, ok := r.(map[string]any); ok {
 					emoji, _ := rMap["emoji"].(string)
 					fromPhone, _ := rMap["from_phone"].(string)
 					fromUser, _ := rMap["from_user"].(string)
@@ -1503,8 +1504,8 @@ func (a *App) buildContactResponse(contact *models.Contact, orgID uuid.UUID) Con
 	profileName := contact.ProfileName
 	shouldMask := a.ShouldMaskPhoneNumbers(orgID)
 	if shouldMask {
-		phoneNumber = MaskPhoneNumber(phoneNumber)
-		profileName = MaskIfPhoneNumber(profileName)
+		phoneNumber = utils.MaskPhoneNumber(phoneNumber)
+		profileName = utils.MaskIfPhoneNumber(profileName)
 	}
 
 	// 24-hour service window: open if customer messaged within the last 24 hours.

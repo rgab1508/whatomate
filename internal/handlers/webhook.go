@@ -162,6 +162,10 @@ type WebhookPayload struct {
 							ResponseSource      string      `json:"response_source"`
 						} `json:"call_permission_reply,omitempty"`
 					} `json:"interactive,omitempty"`
+					Button *struct {
+						Text    string `json:"text"`
+						Payload string `json:"payload"`
+					} `json:"button,omitempty"`
 					Reaction *struct {
 						MessageID string `json:"message_id"`
 						Emoji     string `json:"emoji"`
@@ -183,10 +187,6 @@ type WebhookPayload struct {
 							Type  string `json:"type,omitempty"`
 						} `json:"phones,omitempty"`
 					} `json:"contacts,omitempty"`
-					Button *struct {
-						Payload string `json:"payload"`
-						Text    string `json:"text"`
-					} `json:"button,omitempty"`
 					Context *struct {
 						From string `json:"from"`
 						ID   string `json:"id"`

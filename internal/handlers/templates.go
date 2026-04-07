@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/shridarpatil/whatomate/internal/audit"
 	"github.com/shridarpatil/whatomate/internal/models"
 	"github.com/shridarpatil/whatomate/pkg/whatsapp"
 	"github.com/valyala/fasthttp"
@@ -24,8 +25,8 @@ type TemplateRequest struct {
 	HeaderMediaID   string        `json:"header_media_id"`              // WhatsApp media ID for sending
 	BodyContent     string        `json:"body_content" validate:"required"`
 	FooterContent   string        `json:"footer_content"`
-	Buttons         []interface{} `json:"buttons"`
-	SampleValues    []interface{} `json:"sample_values"`
+	Buttons         []any `json:"buttons"`
+	SampleValues    []any `json:"sample_values"`
 }
 
 // TemplateResponse represents the response for a template
@@ -43,8 +44,10 @@ type TemplateResponse struct {
 	HeaderMediaID   string        `json:"header_media_id"`
 	BodyContent     string        `json:"body_content"`
 	FooterContent   string        `json:"footer_content"`
-	Buttons         []interface{} `json:"buttons"`
-	SampleValues    []interface{} `json:"sample_values"`
+	Buttons         []any `json:"buttons"`
+	SampleValues    []any `json:"sample_values"`
+	CreatedByName   string        `json:"created_by_name,omitempty"`
+	UpdatedByName   string        `json:"updated_by_name,omitempty"`
 	CreatedAt       string        `json:"created_at"`
 	UpdatedAt       string        `json:"updated_at"`
 }
@@ -104,7 +107,7 @@ func (a *App) ListTemplates(r *fastglue.Request) error {
 
 // CreateTemplate creates a new message template
 func (a *App) CreateTemplate(r *fastglue.Request) error {
-	orgID, err := a.getOrgID(r)
+	orgID, userID, err := a.getOrgAndUserID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
@@ -153,12 +156,17 @@ func (a *App) CreateTemplate(r *fastglue.Request) error {
 		FooterContent:   req.FooterContent,
 		Buttons:         convertToJSONBArray(req.Buttons),
 		SampleValues:    convertToJSONBArray(req.SampleValues),
+		CreatedByID:     &userID,
+		UpdatedByID:     &userID,
 	}
 
 	if err := a.DB.Create(&template).Error; err != nil {
 		a.Log.Error("Failed to create template", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to create template", nil, "")
 	}
+
+	audit.LogAudit(a.DB, orgID, userID, audit.GetUserName(a.DB, userID),
+		"template", template.ID, models.AuditActionCreated, nil, &template)
 
 	return r.SendEnvelope(templateToResponse(template))
 }
@@ -175,17 +183,26 @@ func (a *App) GetTemplate(r *fastglue.Request) error {
 		return nil
 	}
 
-	template, err := findByIDAndOrg[models.Template](a.DB, r, id, orgID, "Template")
-	if err != nil {
-		return nil
+	var template models.Template
+	if err := a.DB.Preload("CreatedBy").Preload("UpdatedBy").
+		Where("id = ? AND organization_id = ?", id, orgID).First(&template).Error; err != nil {
+		return r.SendErrorEnvelope(fasthttp.StatusNotFound, "Template not found", nil, "")
 	}
 
-	return r.SendEnvelope(templateToResponse(*template))
+	resp := templateToResponse(template)
+	if template.CreatedBy != nil {
+		resp.CreatedByName = template.CreatedBy.FullName
+	}
+	if template.UpdatedBy != nil {
+		resp.UpdatedByName = template.UpdatedBy.FullName
+	}
+
+	return r.SendEnvelope(resp)
 }
 
 // UpdateTemplate updates a message template
 func (a *App) UpdateTemplate(r *fastglue.Request) error {
-	orgID, err := a.getOrgID(r)
+	orgID, userID, err := a.getOrgAndUserID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
@@ -199,6 +216,9 @@ func (a *App) UpdateTemplate(r *fastglue.Request) error {
 	if err != nil {
 		return nil
 	}
+
+	// Capture old state for audit diff
+	oldTemplate := *template
 
 	// When editing approved or rejected templates, set to DRAFT to indicate local changes pending submission
 	if template.Status == "APPROVED" || template.Status == "REJECTED" {
@@ -237,18 +257,26 @@ func (a *App) UpdateTemplate(r *fastglue.Request) error {
 	if req.SampleValues != nil {
 		template.SampleValues = convertToJSONBArray(req.SampleValues)
 	}
+	template.UpdatedByID = &userID
 
 	if err := a.DB.Save(template).Error; err != nil {
 		a.Log.Error("Failed to update template", "error", err)
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to update template", nil, "")
 	}
 
+	// Build per-button changes
+	var extraChanges []map[string]any
+	extraChanges = append(extraChanges, diffButtons(oldTemplate.Buttons, template.Buttons)...)
+
+	audit.LogAudit(a.DB, orgID, userID, audit.GetUserName(a.DB, userID),
+		"template", template.ID, models.AuditActionUpdated, &oldTemplate, template, extraChanges...)
+
 	return r.SendEnvelope(templateToResponse(*template))
 }
 
 // DeleteTemplate deletes a message template
 func (a *App) DeleteTemplate(r *fastglue.Request) error {
-	orgID, err := a.getOrgID(r)
+	orgID, userID, err := a.getOrgAndUserID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
@@ -276,12 +304,15 @@ func (a *App) DeleteTemplate(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to delete template", nil, "")
 	}
 
+	audit.LogAudit(a.DB, orgID, userID, audit.GetUserName(a.DB, userID),
+		"template", id, models.AuditActionDeleted, template, nil)
+
 	return r.SendEnvelope(map[string]string{"message": "Template deleted successfully"})
 }
 
 // SubmitTemplate submits a template to Meta for approval
 func (a *App) SubmitTemplate(r *fastglue.Request) error {
-	orgID, err := a.getOrgID(r)
+	orgID, userID, err := a.getOrgAndUserID(r)
 	if err != nil {
 		return r.SendErrorEnvelope(fasthttp.StatusUnauthorized, "Unauthorized", nil, "")
 	}
@@ -296,9 +327,18 @@ func (a *App) SubmitTemplate(r *fastglue.Request) error {
 		return nil
 	}
 
+	oldStatus := template.Status
+
 	// Only block if status is PENDING (awaiting approval - can't modify)
 	if template.MetaTemplateID != "" && template.Status == "PENDING" {
 		return r.SendErrorEnvelope(fasthttp.StatusBadRequest, "Template is pending approval and cannot be modified", nil, "")
+	}
+
+	// Validate media header has a handle uploaded
+	if (template.HeaderType == "IMAGE" || template.HeaderType == "VIDEO" || template.HeaderType == "DOCUMENT") && template.HeaderContent == "" {
+		return r.SendErrorEnvelope(fasthttp.StatusBadRequest,
+			fmt.Sprintf("Template has %s header but no media file has been uploaded. Please upload a sample %s first.",
+				template.HeaderType, strings.ToLower(template.HeaderType)), nil, "")
 	}
 
 	// Get the WhatsApp account
@@ -331,7 +371,12 @@ func (a *App) SubmitTemplate(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Template submitted but failed to update local record", nil, "")
 	}
 
-	return r.SendEnvelope(map[string]interface{}{
+	audit.LogAudit(a.DB, orgID, userID, audit.GetUserName(a.DB, userID),
+		"template", template.ID, models.AuditActionUpdated, nil, nil,
+		map[string]any{"field": "published", "old_value": oldStatus, "new_value": "PENDING"},
+	)
+
+	return r.SendEnvelope(map[string]any{
 		"message":          message,
 		"meta_template_id": metaTemplateID,
 		"status":           template.Status,
@@ -420,8 +465,8 @@ func (a *App) SyncTemplates(r *fastglue.Request) error {
 			case "FOOTER":
 				template.FooterContent = comp.Text
 			case "BUTTONS":
-				// Convert []TemplateButton to []interface{}
-				buttons := make([]interface{}, len(comp.Buttons))
+				// Convert []TemplateButton to []any
+				buttons := make([]any, len(comp.Buttons))
 				for i, btn := range comp.Buttons {
 					buttons[i] = btn
 				}
@@ -435,7 +480,7 @@ func (a *App) SyncTemplates(r *fastglue.Request) error {
 			orgID, account.Name, template.Name, template.Language).First(&existing).Error; err == nil {
 			// Update existing and restore if soft-deleted (explicitly set deleted_at to NULL)
 			template.ID = existing.ID
-			a.DB.Unscoped().Model(&template).Updates(map[string]interface{}{
+			a.DB.Unscoped().Model(&template).Updates(map[string]any{
 				"meta_template_id": template.MetaTemplateID,
 				"display_name":     template.DisplayName,
 				"category":         template.Category,
@@ -454,7 +499,7 @@ func (a *App) SyncTemplates(r *fastglue.Request) error {
 		synced++
 	}
 
-	return r.SendEnvelope(map[string]interface{}{
+	return r.SendEnvelope(map[string]any{
 		"message": fmt.Sprintf("Synced %d templates", synced),
 		"count":   synced,
 	})
@@ -515,18 +560,18 @@ func normalizeTemplateName(name string) string {
 	return result.String()
 }
 
-func convertToJSONBArray(arr []interface{}) models.JSONBArray {
+func convertToJSONBArray(arr []any) models.JSONBArray {
 	if arr == nil {
 		return models.JSONBArray{}
 	}
 	return models.JSONBArray(arr)
 }
 
-func convertFromJSONBArray(arr models.JSONBArray) []interface{} {
+func convertFromJSONBArray(arr models.JSONBArray) []any {
 	if arr == nil {
-		return []interface{}{}
+		return []any{}
 	}
-	return []interface{}(arr)
+	return []any(arr)
 }
 
 // UploadTemplateMedia uploads a media file for use as template header sample
@@ -620,4 +665,84 @@ func (a *App) UploadTemplateMedia(r *fastglue.Request) error {
 		"mime_type": mimeType,
 		"size":      fileHeader.Size,
 	})
+}
+
+// diffButtons compares old and new button arrays and returns per-button field-level changes.
+func diffButtons(oldButtons, newButtons models.JSONBArray) []map[string]any {
+	var changes []map[string]any
+
+	toButtonMap := func(btn any) map[string]string {
+		m, ok := btn.(map[string]any)
+		if !ok {
+			return nil
+		}
+		result := make(map[string]string)
+		for k, v := range m {
+			result[k] = fmt.Sprintf("%v", v)
+		}
+		return result
+	}
+
+	maxLen := len(oldButtons)
+	if len(newButtons) > maxLen {
+		maxLen = len(newButtons)
+	}
+
+	for i := 0; i < maxLen; i++ {
+		label := fmt.Sprintf("Button %d", i+1)
+		if i >= len(oldButtons) {
+			// New button added
+			newBtn := toButtonMap(newButtons[i])
+			if newBtn != nil {
+				if t := newBtn["text"]; t != "" {
+					label = fmt.Sprintf("Button %d (%s)", i+1, t)
+				}
+			}
+			changes = append(changes, map[string]any{
+				"field": label, "old_value": nil, "new_value": "added",
+			})
+			continue
+		}
+		if i >= len(newButtons) {
+			// Button removed
+			oldBtn := toButtonMap(oldButtons[i])
+			if oldBtn != nil {
+				if t := oldBtn["text"]; t != "" {
+					label = fmt.Sprintf("Button %d (%s)", i+1, t)
+				}
+			}
+			changes = append(changes, map[string]any{
+				"field": label, "old_value": "removed", "new_value": nil,
+			})
+			continue
+		}
+
+		oldBtn := toButtonMap(oldButtons[i])
+		newBtn := toButtonMap(newButtons[i])
+		if oldBtn == nil || newBtn == nil {
+			continue
+		}
+
+		// Determine button label from new text (or old if new is empty)
+		if t := newBtn["text"]; t != "" {
+			label = fmt.Sprintf("Button %d (%s)", i+1, t)
+		} else if t := oldBtn["text"]; t != "" {
+			label = fmt.Sprintf("Button %d (%s)", i+1, t)
+		}
+
+		// Compare individual fields
+		fields := []string{"type", "text", "url", "phone_number", "example"}
+		for _, f := range fields {
+			oldVal, newVal := oldBtn[f], newBtn[f]
+			if oldVal != newVal {
+				changes = append(changes, map[string]any{
+					"field":     label + " → " + f,
+					"old_value": oldVal,
+					"new_value": newVal,
+				})
+			}
+		}
+	}
+
+	return changes
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/shridarpatil/whatomate/internal/database"
+	"github.com/shridarpatil/whatomate/internal/utils"
 	"github.com/shridarpatil/whatomate/internal/models"
 	"github.com/valyala/fasthttp"
 	"github.com/zerodha/fastglue"
@@ -74,7 +75,7 @@ func (a *App) GetOrganizationSettings(r *fastglue.Request) error {
 		}
 	}
 
-	return r.SendEnvelope(map[string]interface{}{
+	return r.SendEnvelope(map[string]any{
 		"settings": settings,
 		"name":     org.Name,
 	})
@@ -146,14 +147,18 @@ func (a *App) UpdateOrganizationSettings(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to update settings", nil, "")
 	}
 
-	return r.SendEnvelope(map[string]interface{}{
+	if a.CallManager != nil {
+		a.CallManager.InvalidateOrgCallingSettingsCache(orgID)
+	}
+
+	return r.SendEnvelope(map[string]any{
 		"message": "Settings updated successfully",
 	})
 }
 
 // IsCallingEnabledForOrg checks if calling is enabled for an organization.
 // Both the global CallManager and the per-org setting must be active.
-func (a *App) IsCallingEnabledForOrg(orgID interface{}) bool {
+func (a *App) IsCallingEnabledForOrg(orgID any) bool {
 	if a.CallManager == nil {
 		return false
 	}
@@ -179,7 +184,7 @@ func (a *App) requireCallingEnabled(r *fastglue.Request, orgID uuid.UUID) error 
 }
 
 // GetOrgCallingConfig returns org-level calling config values, falling back to global defaults.
-func (a *App) GetOrgCallingConfig(orgID interface{}) (maxDuration, transferTimeout int) {
+func (a *App) GetOrgCallingConfig(orgID any) (maxDuration, transferTimeout int) {
 	maxDuration = callingConfigDefault(a.Config.Calling.MaxCallDuration, 3600)
 	transferTimeout = callingConfigDefault(a.Config.Calling.TransferTimeoutSecs, 60)
 
@@ -206,53 +211,17 @@ func callingConfigDefault(val, fallback int) int {
 	return fallback
 }
 
-// MaskPhoneNumber masks a phone number showing only last 4 digits
-func MaskPhoneNumber(phone string) string {
-	if len(phone) <= 4 {
-		return phone
-	}
-	masked := ""
-	for i := 0; i < len(phone)-4; i++ {
-		masked += "*"
-	}
-	return masked + phone[len(phone)-4:]
-}
-
-// LooksLikePhoneNumber checks if a string looks like a phone number
-// (mostly digits, optionally with common phone formatting characters)
-func LooksLikePhoneNumber(s string) bool {
-	if len(s) < 7 {
-		return false
-	}
-	digitCount := 0
-	for _, c := range s {
-		if c >= '0' && c <= '9' {
-			digitCount++
-		}
-	}
-	// If at least 7 digits and more than 70% of the string is digits
-	return digitCount >= 7 && float64(digitCount)/float64(len(s)) > 0.7
-}
-
-// MaskIfPhoneNumber masks a string if it looks like a phone number
-func MaskIfPhoneNumber(s string) string {
-	if LooksLikePhoneNumber(s) {
-		return MaskPhoneNumber(s)
-	}
-	return s
-}
-
 // MaskContactFields conditionally masks a profile name and phone number
 // if phone masking is enabled for the given organization.
-func (a *App) MaskContactFields(orgID interface{}, profileName, phoneNumber string) (string, string) {
+func (a *App) MaskContactFields(orgID any, profileName, phoneNumber string) (string, string) {
 	if a.ShouldMaskPhoneNumbers(orgID) {
-		return MaskIfPhoneNumber(profileName), MaskPhoneNumber(phoneNumber)
+		return utils.MaskIfPhoneNumber(profileName), utils.MaskPhoneNumber(phoneNumber)
 	}
 	return profileName, phoneNumber
 }
 
 // ShouldMaskPhoneNumbers checks if phone masking is enabled for the organization
-func (a *App) ShouldMaskPhoneNumbers(orgID interface{}) bool {
+func (a *App) ShouldMaskPhoneNumbers(orgID any) bool {
 	var org models.Organization
 	if err := a.DB.Where("id = ?", orgID).First(&org).Error; err != nil {
 		return false
@@ -484,7 +453,7 @@ func (a *App) ListOrganizationMembers(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to list members", nil, "")
 	}
 
-	return r.SendEnvelope(map[string]interface{}{
+	return r.SendEnvelope(map[string]any{
 		"members": response,
 		"total":   total,
 		"page":    pg.Page,

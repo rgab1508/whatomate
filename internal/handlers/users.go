@@ -163,7 +163,7 @@ func (a *App) ListUsers(r *fastglue.Request) error {
 		response[i] = resp
 	}
 
-	return r.SendEnvelope(map[string]interface{}{
+	return r.SendEnvelope(map[string]any{
 		"users": response,
 		"total": total,
 		"page":  pg.Page,
@@ -276,7 +276,7 @@ func (a *App) CreateUser(r *fastglue.Request) error {
 	var softDeleted models.User
 	if err := a.DB.Unscoped().Where("email = ? AND deleted_at IS NOT NULL", req.Email).First(&softDeleted).Error; err == nil {
 		// Restore the soft-deleted user with new details
-		if err := a.DB.Unscoped().Model(&softDeleted).Updates(map[string]interface{}{
+		if err := a.DB.Unscoped().Model(&softDeleted).Updates(map[string]any{
 			"deleted_at":      nil,
 			"organization_id": orgID,
 			"password_hash":   string(hashedPassword),
@@ -292,7 +292,7 @@ func (a *App) CreateUser(r *fastglue.Request) error {
 		// Restore or create UserOrganization entry
 		var existingOrg models.UserOrganization
 		if err := a.DB.Unscoped().Where("user_id = ? AND organization_id = ?", softDeleted.ID, orgID).First(&existingOrg).Error; err == nil {
-			a.DB.Unscoped().Model(&existingOrg).Updates(map[string]interface{}{
+			a.DB.Unscoped().Model(&existingOrg).Updates(map[string]any{
 				"deleted_at": nil,
 				"role_id":    roleID,
 				"is_default": true,
@@ -691,7 +691,7 @@ func (a *App) UpdateCurrentUserSettings(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to update settings", nil, "")
 	}
 
-	return r.SendEnvelope(map[string]interface{}{
+	return r.SendEnvelope(map[string]any{
 		"message":  "Settings updated successfully",
 		"settings": user.Settings,
 	})
@@ -830,7 +830,7 @@ func (a *App) ListMyOrganizations(r *fastglue.Request) error {
 		response = append(response, item)
 	}
 
-	return r.SendEnvelope(map[string]interface{}{
+	return r.SendEnvelope(map[string]any{
 		"organizations": response,
 	})
 }
@@ -904,7 +904,7 @@ func (a *App) UpdateAvailability(r *fastglue.Request) error {
 		}
 	}
 
-	return r.SendEnvelope(map[string]interface{}{
+	return r.SendEnvelope(map[string]any{
 		"message":             "Availability updated successfully",
 		"is_available":        user.IsAvailable,
 		"status":              status,

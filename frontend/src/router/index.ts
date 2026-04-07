@@ -71,6 +71,12 @@ const router = createRouter({
           meta: { permission: 'templates' }
         },
         {
+          path: 'templates/:id',
+          name: 'template-detail',
+          component: () => import('@/views/settings/TemplateDetailView.vue'),
+          meta: { permission: 'templates' }
+        },
+        {
           path: 'flows',
           name: 'flows',
           component: () => import('@/views/settings/FlowsView.vue'),
@@ -80,6 +86,12 @@ const router = createRouter({
           path: 'campaigns',
           name: 'campaigns',
           component: () => import('@/views/settings/CampaignsView.vue'),
+          meta: { permission: 'campaigns' }
+        },
+        {
+          path: 'campaigns/:id',
+          name: 'campaign-detail',
+          component: () => import('@/views/settings/CampaignDetailView.vue'),
           meta: { permission: 'campaigns' }
         },
         {
@@ -96,6 +108,12 @@ const router = createRouter({
           path: 'chatbot/keywords',
           name: 'chatbot-keywords',
           component: () => import('@/views/chatbot/KeywordsView.vue'),
+          meta: { permission: 'chatbot.keywords' }
+        },
+        {
+          path: 'chatbot/keywords/:id',
+          name: 'keyword-detail',
+          component: () => import('@/views/chatbot/KeywordDetailView.vue'),
           meta: { permission: 'chatbot.keywords' }
         },
         {
@@ -135,6 +153,12 @@ const router = createRouter({
           meta: { permission: 'chatbot.ai' }
         },
         {
+          path: 'chatbot/ai/:id',
+          name: 'ai-context-detail',
+          component: () => import('@/views/chatbot/AIContextDetailView.vue'),
+          meta: { permission: 'chatbot.ai' }
+        },
+        {
           path: 'chatbot/transfers',
           name: 'chatbot-transfers',
           component: () => import('@/views/chatbot/AgentTransfersView.vue'),
@@ -168,6 +192,12 @@ const router = createRouter({
           path: 'settings/accounts',
           name: 'accounts',
           component: () => import('@/views/settings/AccountsView.vue'),
+          meta: { permission: 'accounts' }
+        },
+        {
+          path: 'settings/accounts/:id',
+          name: 'account-detail',
+          component: () => import('@/views/settings/AccountDetailView.vue'),
           meta: { permission: 'accounts' }
         },
         {
@@ -207,6 +237,12 @@ const router = createRouter({
           meta: { permission: 'teams' }
         },
         {
+          path: 'settings/teams/:id',
+          name: 'team-detail',
+          component: () => import('@/views/settings/TeamDetailView.vue'),
+          meta: { permission: 'teams' }
+        },
+        {
           path: 'settings/api-keys',
           name: 'api-keys',
           component: () => import('@/views/settings/APIKeysView.vue'),
@@ -229,6 +265,18 @@ const router = createRouter({
           name: 'custom-actions',
           component: () => import('@/views/settings/CustomActionsView.vue'),
           meta: { permission: 'custom_actions' }
+        },
+        {
+          path: 'settings/audit-logs',
+          name: 'audit-logs',
+          component: () => import('@/views/settings/AuditLogsView.vue'),
+          meta: { permission: 'audit_logs' }
+        },
+        {
+          path: 'settings/audit-logs/:id',
+          name: 'audit-log-detail',
+          component: () => import('@/views/settings/AuditLogDetailView.vue'),
+          meta: { permission: 'audit_logs' }
         },
         {
           path: 'calling',

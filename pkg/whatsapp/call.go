@@ -16,7 +16,7 @@ func (c *Client) buildCallsURL(account *Account) string {
 // Per the WhatsApp Business Calling API, pre_accept requires the session object
 // with the SDP answer to keep the call alive while WebRTC is finalized.
 func (c *Client) PreAcceptCall(ctx context.Context, account *Account, callID, sdpAnswer string) error {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"messaging_product": "whatsapp",
 		"call_id":           callID,
 		"action":            "pre_accept",
@@ -42,7 +42,7 @@ func (c *Client) PreAcceptCall(ctx context.Context, account *Account, callID, sd
 // Per the WhatsApp Business Calling API, accept uses the same session object format.
 // The API returns { success: true } on success.
 func (c *Client) AcceptCall(ctx context.Context, account *Account, callID, sdpAnswer string) error {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"messaging_product": "whatsapp",
 		"call_id":           callID,
 		"action":            "accept",
@@ -92,12 +92,12 @@ func (c *Client) SendCallPermissionRequest(ctx context.Context, account *Account
 		bodyText = "We'd like to call you to assist with your query."
 	}
 
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"messaging_product": "whatsapp",
 		"recipient_type":    "individual",
 		"to":                phoneNumber,
 		"type":              "interactive",
-		"interactive": map[string]interface{}{
+		"interactive": map[string]any{
 			"type": "call_permission_request",
 			"action": map[string]string{
 				"name": "call_permission_request",
@@ -156,7 +156,7 @@ func (c *Client) GetCallPermission(ctx context.Context, account *Account, userPh
 // InitiateCall places an outgoing call to a WhatsApp user with an SDP offer.
 // Returns the call_id assigned by WhatsApp on success.
 func (c *Client) InitiateCall(ctx context.Context, account *Account, phoneNumber, sdpOffer string) (string, error) {
-	payload := map[string]interface{}{
+	payload := map[string]any{
 		"messaging_product": "whatsapp",
 		"to":                phoneNumber,
 		"action":            "connect",

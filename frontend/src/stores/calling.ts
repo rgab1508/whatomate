@@ -39,6 +39,7 @@ export const useCallingStore = defineStore('calling', () => {
   const outgoingCallStatus = ref<'initiating' | 'ringing' | 'answered' | 'ended' | null>(null)
   const outgoingContactName = ref<string>('')
   const outgoingContactPhone = ref<string>('')
+  const isOnHold = ref(false)
   const isTransferring = ref(false)
 
   // Computed
@@ -387,6 +388,20 @@ export const useCallingStore = defineStore('calling', () => {
     }
   }
 
+  async function holdCall() {
+    const callLogId = outgoingCallLogId.value ?? activeTransfer.value?.call_log_id
+    if (!callLogId) return
+    await callLogsService.hold(callLogId)
+    isOnHold.value = true
+  }
+
+  async function resumeCall() {
+    const callLogId = outgoingCallLogId.value ?? activeTransfer.value?.call_log_id
+    if (!callLogId) return
+    await callLogsService.resume(callLogId)
+    isOnHold.value = false
+  }
+
   function cleanup() {
     if (durationTimer) {
       clearInterval(durationTimer)
@@ -401,6 +416,7 @@ export const useCallingStore = defineStore('calling', () => {
       localStream.value = null
     }
     isOnCall.value = false
+    isOnHold.value = false
     activeTransfer.value = null
     outgoingCallLogId.value = null
     outgoingCallStatus.value = null
@@ -438,6 +454,16 @@ export const useCallingStore = defineStore('calling', () => {
         waitingTransfers.value = waitingTransfers.value.filter(t => t.id !== payload.id)
         if (activeTransfer.value?.id === payload.id) {
           cleanup()
+        }
+        break
+      case 'call_hold':
+        if (isOnCall.value) {
+          isOnHold.value = true
+        }
+        break
+      case 'call_resumed':
+        if (isOnCall.value) {
+          isOnHold.value = false
         }
         break
       case 'call_ended':
@@ -512,10 +538,13 @@ export const useCallingStore = defineStore('calling', () => {
     isOnCall,
     callDuration,
     isMuted,
+    isOnHold,
     fetchWaitingTransfers,
     acceptTransfer,
     endCall,
     toggleMute,
+    holdCall,
+    resumeCall,
     cleanup,
     isTransferring,
     initiateTransfer,
