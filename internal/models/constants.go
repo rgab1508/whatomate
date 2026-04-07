@@ -219,6 +219,7 @@ type TriggerType string
 const (
 	TriggerTypeKeywords TriggerType = "keywords"
 	TriggerTypeWebhook  TriggerType = "webhook"
+	TriggerTypeButton   TriggerType = "button"
 )
 
 // WebhookEvent represents webhook event types

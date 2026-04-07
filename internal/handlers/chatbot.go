@@ -760,6 +760,7 @@ func (a *App) CreateChatbotFlow(r *fastglue.Request) error {
 		Description       string                 `json:"description"`
 		TriggerKeywords   []string               `json:"trigger_keywords"`
 		TriggerType       models.TriggerType     `json:"trigger_type"`
+		TriggerButtonID   string                 `json:"trigger_button_id"`
 		InitialMessage    string                 `json:"initial_message"`
 		CompletionMessage string                 `json:"completion_message"`
 		OnCompleteAction  string                 `json:"on_complete_action"`
@@ -804,6 +805,7 @@ func (a *App) CreateChatbotFlow(r *fastglue.Request) error {
 		Description:       req.Description,
 		TriggerKeywords:   req.TriggerKeywords,
 		TriggerType:       triggerType,
+		TriggerButtonID:   req.TriggerButtonID,
 		WebhookToken:      webhookToken,
 		InitialMessage:    req.InitialMessage,
 		CompletionMessage: req.CompletionMessage,
@@ -970,6 +972,7 @@ func (a *App) UpdateChatbotFlow(r *fastglue.Request) error {
 		Description       *string                `json:"description"`
 		TriggerKeywords   []string               `json:"trigger_keywords"`
 		TriggerType       *models.TriggerType    `json:"trigger_type"`
+		TriggerButtonID   *string                `json:"trigger_button_id"`
 		RegenerateToken   bool                   `json:"regenerate_token"`
 		InitialMessage    *string                `json:"initial_message"`
 		CompletionMessage *string                `json:"completion_message"`
@@ -992,8 +995,11 @@ func (a *App) UpdateChatbotFlow(r *fastglue.Request) error {
 	if req.Description != nil {
 		flow.Description = *req.Description
 	}
-	if len(req.TriggerKeywords) > 0 {
+	if req.TriggerKeywords != nil {
 		flow.TriggerKeywords = req.TriggerKeywords
+	}
+	if req.TriggerButtonID != nil {
+		flow.TriggerButtonID = *req.TriggerButtonID
 	}
 	// Handle trigger type changes
 	if req.TriggerType != nil {
@@ -1005,7 +1011,7 @@ func (a *App) UpdateChatbotFlow(r *fastglue.Request) error {
 				return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to generate webhook token", nil, "")
 			}
 			flow.WebhookToken = &token
-		} else if *req.TriggerType == models.TriggerTypeKeywords {
+		} else if *req.TriggerType == models.TriggerTypeKeywords || *req.TriggerType == models.TriggerTypeButton {
 			flow.WebhookToken = nil
 		}
 	}

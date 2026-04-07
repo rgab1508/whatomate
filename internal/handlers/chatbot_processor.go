@@ -76,6 +76,10 @@ type IncomingTextMessage struct {
 		From string `json:"from"`
 		ID   string `json:"id"` // WhatsApp message ID being replied to
 	} `json:"context,omitempty"`
+	Button *struct {
+		Payload string `json:"payload"`
+		Text    string `json:"text"`
+	} `json:"button,omitempty"`
 	Reaction *struct {
 		MessageID string `json:"message_id"` // WhatsApp message ID being reacted to
 		Emoji     string `json:"emoji"`      // The emoji reaction (empty string = remove reaction)
@@ -173,6 +177,11 @@ func (a *App) processIncomingMessageFull(phoneNumberID, displayPhoneNumber strin
 				}
 			}
 		}
+	} else if msg.Type == "button" && msg.Button != nil {
+		// Handle template quick reply button click
+		messageText = msg.Button.Text
+		buttonID = msg.Button.Payload
+		messageType = "button_reply"
 	} else if msg.Type == "image" && msg.Image != nil {
 		// Handle image message
 		messageText = msg.Image.Caption
@@ -372,8 +381,8 @@ func (a *App) processIncomingMessageFull(phoneNumberID, displayPhoneNumber strin
 		return
 	}
 
-	// Try to match flow trigger keywords first (before greeting to avoid duplicate messages)
-	if flow := a.matchFlowTrigger(account.OrganizationID, account.Name, messageText); flow != nil {
+	// Try to match flow trigger (keywords or button ID)
+	if flow := a.matchFlowTrigger(account.OrganizationID, account.Name, messageText, buttonID); flow != nil {
 		a.startFlow(account, session, contact, flow)
 		return
 	}
@@ -814,8 +823,8 @@ func (a *App) logFlowEvent(sessionID, flowID uuid.UUID, stepName string, eventTy
 	}
 }
 
-// matchFlowTrigger checks if the message triggers any flow
-func (a *App) matchFlowTrigger(orgID uuid.UUID, accountName, messageText string) *models.ChatbotFlow {
+// matchFlowTrigger checks if the message triggers any flow via keywords or button ID
+func (a *App) matchFlowTrigger(orgID uuid.UUID, accountName, messageText, buttonID string) *models.ChatbotFlow {
 	// Use cached flows (includes steps)
 	flows, err := a.getChatbotFlowsCached(orgID)
 	if err != nil {
@@ -826,12 +835,25 @@ func (a *App) matchFlowTrigger(orgID uuid.UUID, accountName, messageText string)
 	messageLower := strings.ToLower(messageText)
 
 	for _, flow := range flows {
-		// Skip webhook-triggered flows from keyword matching
+		// Skip webhook-triggered flows from keyword/button matching
 		if flow.TriggerType == models.TriggerTypeWebhook {
 			continue
 		}
+
+		// Match by button ID (template quick reply buttons)
+		if buttonID != "" && flow.TriggerButtonID != "" {
+			if strings.EqualFold(buttonID, flow.TriggerButtonID) {
+				return &flow
+			}
+		}
+
+		// Match by keywords (also checks button text/payload for template buttons)
 		for _, keyword := range flow.TriggerKeywords {
 			if strings.Contains(messageLower, strings.ToLower(keyword)) {
+				return &flow
+			}
+			// Also match button payload against keywords
+			if buttonID != "" && strings.EqualFold(buttonID, keyword) {
 				return &flow
 			}
 		}

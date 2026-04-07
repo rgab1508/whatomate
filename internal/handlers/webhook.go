@@ -183,6 +183,10 @@ type WebhookPayload struct {
 							Type  string `json:"type,omitempty"`
 						} `json:"phones,omitempty"`
 					} `json:"contacts,omitempty"`
+					Button *struct {
+						Payload string `json:"payload"`
+						Text    string `json:"text"`
+					} `json:"button,omitempty"`
 					Context *struct {
 						From string `json:"from"`
 						ID   string `json:"id"`

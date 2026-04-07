@@ -272,8 +272,9 @@ function createDefaultStep(): FlowStep {
 const formData = ref({
   name: '',
   description: '',
-  trigger_type: 'keywords' as 'keywords' | 'webhook',
+  trigger_type: 'keywords' as 'keywords' | 'webhook' | 'button',
   trigger_keywords: '',
+  trigger_button_id: '',
   webhook_token: '',
   webhook_url: '',
   initial_message: 'Hi! Let me help you with that.',
@@ -448,6 +449,7 @@ async function loadFlow(id: string) {
       description: flow.description || flow.Description || '',
       trigger_type: flow.trigger_type || flow.TriggerType || 'keywords',
       trigger_keywords: (flow.trigger_keywords || flow.TriggerKeywords || []).join(', '),
+      trigger_button_id: flow.trigger_button_id || flow.TriggerButtonID || '',
       webhook_token: flow.webhook_token || flow.WebhookToken || '',
       webhook_url: flow.webhook_url || flow.WebhookURL || '',
       initial_message: flow.initial_message || flow.InitialMessage || '',
@@ -823,9 +825,10 @@ async function saveFlow() {
       name: formData.value.name,
       description: formData.value.description,
       trigger_type: formData.value.trigger_type,
-      trigger_keywords: formData.value.trigger_type === 'keywords'
+      trigger_keywords: formData.value.trigger_type === 'keywords' || formData.value.trigger_type === 'button'
         ? formData.value.trigger_keywords.split(',').map(k => k.trim()).filter(Boolean)
         : [],
+      trigger_button_id: formData.value.trigger_type === 'button' ? formData.value.trigger_button_id : '',
       initial_message: formData.value.initial_message,
       completion_message: formData.value.completion_message,
       on_complete_action: formData.value.on_complete_action,
@@ -1104,6 +1107,7 @@ function confirmCancel() {
                 </SelectTrigger>
                 <SelectContent>
                   <SelectItem value="keywords">Keywords</SelectItem>
+                  <SelectItem value="button">Template Button</SelectItem>
                   <SelectItem value="webhook">Webhook</SelectItem>
                 </SelectContent>
               </Select>
@@ -1118,6 +1122,28 @@ function confirmCancel() {
                 class="h-8 text-xs"
               />
               <p class="text-[10px] text-muted-foreground">{{ $t('flowBuilder.triggerKeywordsHint') }}</p>
+            </div>
+
+            <!-- Template Button Trigger -->
+            <div class="space-y-3" v-if="formData.trigger_type === 'button'">
+              <div class="space-y-1.5">
+                <Label class="text-xs">Button Payload</Label>
+                <Input
+                  v-model="formData.trigger_button_id"
+                  placeholder="e.g. order_on_whatsapp"
+                  class="h-8 text-xs"
+                />
+                <p class="text-[10px] text-muted-foreground">The payload value set on your template's quick reply button. This is matched when a contact clicks the button.</p>
+              </div>
+              <div class="space-y-1.5">
+                <Label class="text-xs">Also match keywords (optional)</Label>
+                <Input
+                  v-model="formData.trigger_keywords"
+                  placeholder="order, buy now"
+                  class="h-8 text-xs"
+                />
+                <p class="text-[10px] text-muted-foreground">Comma-separated keywords to also trigger this flow from regular text messages.</p>
+              </div>
             </div>
 
             <!-- Webhook URL (shown when type is webhook) -->
