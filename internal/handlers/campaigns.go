@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/shridarpatil/whatomate/internal/audit"
 	"github.com/shridarpatil/whatomate/internal/models"
 	"github.com/shridarpatil/whatomate/internal/queue"
 	"github.com/shridarpatil/whatomate/internal/utils"
@@ -33,35 +32,39 @@ type CampaignRequest struct {
 
 // CampaignResponse represents campaign in API responses
 type CampaignResponse struct {
-	ID                    uuid.UUID             `json:"id"`
-	Name                  string                `json:"name"`
-	WhatsAppAccount       string                `json:"whatsapp_account"`
-	TemplateID            uuid.UUID             `json:"template_id"`
-	TemplateName          string                `json:"template_name,omitempty"`
-	HeaderMediaID         string                `json:"header_media_id,omitempty"`
-	HeaderMediaFilename   string                `json:"header_media_filename,omitempty"`
-	HeaderMediaMimeType   string                `json:"header_media_mime_type,omitempty"`
-	UseMMAPI              bool                  `json:"use_mm_api"`
-	Status                models.CampaignStatus `json:"status"`
-	TotalRecipients int                  `json:"total_recipients"`
-	SentCount       int                  `json:"sent_count"`
-	DeliveredCount  int                  `json:"delivered_count"`
-	ReadCount       int                  `json:"read_count"`
-	FailedCount     int                  `json:"failed_count"`
-	ScheduledAt     *time.Time           `json:"scheduled_at,omitempty"`
-	StartedAt       *time.Time           `json:"started_at,omitempty"`
-	CompletedAt     *time.Time           `json:"completed_at,omitempty"`
-	CreatedByName   string               `json:"created_by_name,omitempty"`
-	UpdatedByName   string               `json:"updated_by_name,omitempty"`
-	CreatedAt       time.Time            `json:"created_at"`
-	UpdatedAt       time.Time            `json:"updated_at"`
+	ID                  uuid.UUID             `json:"id"`
+	Name                string                `json:"name"`
+	WhatsAppAccount     string                `json:"whatsapp_account"`
+	TemplateID          uuid.UUID             `json:"template_id"`
+	TemplateName        string                `json:"template_name,omitempty"`
+	HeaderMediaID       string                `json:"header_media_id,omitempty"`
+	HeaderMediaFilename string                `json:"header_media_filename,omitempty"`
+	HeaderMediaMimeType string                `json:"header_media_mime_type,omitempty"`
+	UseMMAPI            bool                  `json:"use_mm_api"`
+	Status              models.CampaignStatus `json:"status"`
+	TotalRecipients     int                   `json:"total_recipients"`
+	SentCount           int                   `json:"sent_count"`
+	DeliveredCount      int                   `json:"delivered_count"`
+	ReadCount           int                   `json:"read_count"`
+	FailedCount         int                   `json:"failed_count"`
+	ScheduledAt         *time.Time            `json:"scheduled_at,omitempty"`
+	StartedAt           *time.Time            `json:"started_at,omitempty"`
+	CompletedAt         *time.Time            `json:"completed_at,omitempty"`
+	CreatedByName       string                `json:"created_by_name,omitempty"`
+	UpdatedByName       string                `json:"updated_by_name,omitempty"`
+	CreatedAt           time.Time             `json:"created_at"`
+	UpdatedAt           time.Time             `json:"updated_at"`
 }
 
 // RecipientRequest represents recipient import request
 type RecipientRequest struct {
-	PhoneNumber    string                 `json:"phone_number" validate:"required"`
-	RecipientName  string                 `json:"recipient_name"`
+	PhoneNumber    string         `json:"phone_number" validate:"required"`
+	RecipientName  string         `json:"recipient_name"`
 	TemplateParams map[string]any `json:"template_params"`
+	// HeaderParams carries the value for a TEXT-header variable (max 1 per
+	// Meta), keyed by the variable's name. Kept separate from TemplateParams
+	// so a positional header {{1}} doesn't collide with body {{1}}.
+	HeaderParams map[string]any `json:"header_params"`
 }
 
 // ListCampaigns implements campaign listing
@@ -139,12 +142,7 @@ func (a *App) ListCampaigns(r *fastglue.Request) error {
 		}
 	}
 
-	return r.SendEnvelope(map[string]any{
-		"campaigns": response,
-		"total":     total,
-		"page":      pg.Page,
-		"limit":     pg.Limit,
-	})
+	return r.SendEnvelope(listEnvelope("campaigns", response, total, pg))
 }
 
 // CreateCampaign implements campaign creation
@@ -180,8 +178,8 @@ func (a *App) CreateCampaign(r *fastglue.Request) error {
 		WhatsAppAccount: req.WhatsAppAccount,
 		Name:            req.Name,
 		TemplateID:      templateID,
-		HeaderMediaID:  req.HeaderMediaID,
-		UseMMAPI:       req.UseMMAPI,
+		HeaderMediaID:   req.HeaderMediaID,
+		UseMMAPI:        req.UseMMAPI,
 		Status:          models.CampaignStatusDraft,
 		ScheduledAt:     req.ScheduledAt,
 		CreatedBy:       userID,
@@ -193,7 +191,7 @@ func (a *App) CreateCampaign(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to create campaign", nil, "")
 	}
 
-	audit.LogAudit(a.DB, orgID, userID, audit.GetUserName(a.DB, userID),
+	a.logAudit(orgID, userID,
 		"campaign", campaign.ID, models.AuditActionCreated, nil, &campaign)
 
 	a.Log.Info("Campaign created", "campaign_id", campaign.ID, "name", campaign.Name)
@@ -212,6 +210,7 @@ func (a *App) CreateCampaign(r *fastglue.Request) error {
 		TotalRecipients:     campaign.TotalRecipients,
 		SentCount:           campaign.SentCount,
 		DeliveredCount:      campaign.DeliveredCount,
+		ReadCount:           campaign.ReadCount,
 		FailedCount:         campaign.FailedCount,
 		ScheduledAt:         campaign.ScheduledAt,
 		CreatedAt:           campaign.CreatedAt,
@@ -253,6 +252,7 @@ func (a *App) GetCampaign(r *fastglue.Request) error {
 		TotalRecipients:     campaign.TotalRecipients,
 		SentCount:           campaign.SentCount,
 		DeliveredCount:      campaign.DeliveredCount,
+		ReadCount:           campaign.ReadCount,
 		FailedCount:         campaign.FailedCount,
 		ScheduledAt:         campaign.ScheduledAt,
 		StartedAt:           campaign.StartedAt,
@@ -304,9 +304,9 @@ func (a *App) UpdateCampaign(r *fastglue.Request) error {
 
 	// Update fields
 	updates := map[string]any{
-		"name":           req.Name,
-		"scheduled_at":   req.ScheduledAt,
-		"updated_by_id":  userID,
+		"name":          req.Name,
+		"scheduled_at":  req.ScheduledAt,
+		"updated_by_id": userID,
 	}
 
 	if req.TemplateID != "" {
@@ -329,7 +329,7 @@ func (a *App) UpdateCampaign(r *fastglue.Request) error {
 	// Reload campaign
 	a.DB.Where("id = ?", id).Preload("Template").Preload("Creator").Preload("UpdatedBy").First(campaign)
 
-	audit.LogAudit(a.DB, orgID, userID, audit.GetUserName(a.DB, userID),
+	a.logAudit(orgID, userID,
 		"campaign", campaign.ID, models.AuditActionUpdated, &oldCampaign, campaign)
 
 	response := CampaignResponse{
@@ -345,6 +345,7 @@ func (a *App) UpdateCampaign(r *fastglue.Request) error {
 		TotalRecipients:     campaign.TotalRecipients,
 		SentCount:           campaign.SentCount,
 		DeliveredCount:      campaign.DeliveredCount,
+		ReadCount:           campaign.ReadCount,
 		FailedCount:         campaign.FailedCount,
 		ScheduledAt:         campaign.ScheduledAt,
 		CreatedAt:           campaign.CreatedAt,
@@ -397,7 +398,7 @@ func (a *App) DeleteCampaign(r *fastglue.Request) error {
 		return r.SendErrorEnvelope(fasthttp.StatusInternalServerError, "Failed to delete campaign", nil, "")
 	}
 
-	audit.LogAudit(a.DB, orgID, userID, audit.GetUserName(a.DB, userID),
+	a.logAudit(orgID, userID,
 		"campaign", id, models.AuditActionDeleted, campaign, nil)
 
 	a.Log.Info("Campaign deleted", "campaign_id", id)
@@ -472,6 +473,7 @@ func (a *App) StartCampaign(r *fastglue.Request) error {
 			PhoneNumber:    recipient.PhoneNumber,
 			RecipientName:  recipient.RecipientName,
 			TemplateParams: recipient.TemplateParams,
+			HeaderParams:   recipient.HeaderParams,
 		}
 	}
 
@@ -633,6 +635,7 @@ func (a *App) RetryFailed(r *fastglue.Request) error {
 			PhoneNumber:    recipient.PhoneNumber,
 			RecipientName:  recipient.RecipientName,
 			TemplateParams: recipient.TemplateParams,
+			HeaderParams:   recipient.HeaderParams,
 		}
 	}
 
@@ -686,6 +689,7 @@ func (a *App) ImportRecipients(r *fastglue.Request) error {
 			PhoneNumber:    rec.PhoneNumber,
 			RecipientName:  rec.RecipientName,
 			TemplateParams: models.JSONB(rec.TemplateParams),
+			HeaderParams:   models.JSONB(rec.HeaderParams),
 			Status:         models.MessageStatusPending,
 		}
 	}
@@ -707,7 +711,7 @@ func (a *App) ImportRecipients(r *fastglue.Request) error {
 	for i, rec := range req.Recipients {
 		phoneNumbers[i] = rec.PhoneNumber
 	}
-	audit.LogAudit(a.DB, orgID, userID, audit.GetUserName(a.DB, userID),
+	a.logAudit(orgID, userID,
 		"campaign", id, models.AuditActionUpdated, nil, nil,
 		map[string]any{
 			"field":     "recipients_added",
@@ -804,7 +808,7 @@ func (a *App) DeleteCampaignRecipient(r *fastglue.Request) error {
 	// Update campaign recipient count
 	a.DB.Model(campaign).Update("total_recipients", gorm.Expr("total_recipients - 1"))
 
-	audit.LogAudit(a.DB, orgID, userID, audit.GetUserName(a.DB, userID),
+	a.logAudit(orgID, userID,
 		"campaign", campaignUUID, models.AuditActionUpdated, nil, nil,
 		map[string]any{
 			"field":     "recipient_removed",
@@ -892,7 +896,7 @@ func (a *App) UploadCampaignMedia(r *fastglue.Request) error {
 		"video/mp4": true, "video/3gpp": true,
 		"audio/aac": true, "audio/mp4": true, "audio/mpeg": true, "audio/ogg": true,
 		"application/pdf": true, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": true,
-		"application/vnd.openxmlformats-officedocument.wordprocessingml.document": true,
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document":   true,
 		"application/vnd.openxmlformats-officedocument.presentationml.presentation": true,
 	}
 	if !allowedMIME[mimeType] {
@@ -1161,4 +1165,3 @@ func sanitizeFilename(name string) string {
 	}
 	return name
 }
-

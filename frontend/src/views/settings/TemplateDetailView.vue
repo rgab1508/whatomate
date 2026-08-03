@@ -48,6 +48,7 @@ import {
   Info,
 } from 'lucide-vue-next'
 import { getErrorMessage } from '@/lib/api-utils'
+import { getQualityBadgeClass, getQualityRatingLabel } from '@/lib/utils'
 
 interface WhatsAppAccount {
   id: string
@@ -70,10 +71,13 @@ interface Template {
   footer_content: string
   buttons: any[]
   sample_values: any[]
+  add_security_recommendation: boolean
+  code_expiration_minutes: number
   created_by_name: string
   updated_by_name: string
   created_at: string
   updated_at: string
+  quality_rating?: string
 }
 
 const route = useRoute()
@@ -82,9 +86,59 @@ const { t } = useI18n()
 const authStore = useAuthStore()
 
 const bodyHint = 'Use {{1}}, {{2}} for positional or {{name}}, {{email}} for named parameters.'
+const mixedVariablesHint = 'Cannot mix positional ({{1}}, {{2}}) and named ({{name}}) variables. Use one type only.'
+const duplicateVariablesHint = 'Duplicate variables found. Each variable should appear only once in the template.'
+const variablePositionHint = 'Variables cannot be at the very start or end of the template body.'
+const headerTooManyVariablesHint = 'Meta allows at most one variable in a TEXT header.'
 
 const templateId = computed(() => route.params.id as string)
 const isNew = computed(() => templateId.value === 'new')
+const isAuthentication = computed(() => form.value.category === 'AUTHENTICATION')
+
+// OTP type for auth templates — derived from the buttons array
+const authOtpType = computed(() => {
+  if (!isAuthentication.value) return 'COPY_CODE'
+  const otpBtn = form.value.buttons.find((b: any) => b.type === 'OTP')
+  return otpBtn?.otp_type || 'COPY_CODE'
+})
+
+const zeroTapAccepted = ref(false)
+
+function setAuthOtpType(type: string | number | bigint | Record<string, any> | null) {
+  if (!type || typeof type !== 'string') return
+  zeroTapAccepted.value = false
+  const existing = form.value.buttons.find((b: any) => b.type === 'OTP')
+  if (existing) {
+    existing.otp_type = type
+    if (type === 'ONE_TAP' || type === 'ZERO_TAP') {
+      if (!existing.supported_apps?.length) {
+        existing.supported_apps = [{ package_name: '', signature_hash: '' }]
+      }
+    }
+  } else {
+    const btn: any = { type: 'OTP', text: 'Copy code', otp_type: type }
+    if (type === 'ONE_TAP' || type === 'ZERO_TAP') {
+      btn.supported_apps = [{ package_name: '', signature_hash: '' }]
+    }
+    form.value.buttons = [btn]
+  }
+}
+
+function addSupportedApp() {
+  const otpBtn = form.value.buttons.find((b: any) => b.type === 'OTP')
+  if (otpBtn && (!otpBtn.supported_apps || otpBtn.supported_apps.length < 5)) {
+    if (!otpBtn.supported_apps) otpBtn.supported_apps = []
+    otpBtn.supported_apps.push({ package_name: '', signature_hash: '' })
+  }
+}
+
+function removeSupportedApp(index: number) {
+  const otpBtn = form.value.buttons.find((b: any) => b.type === 'OTP')
+  if (otpBtn?.supported_apps?.length > 1) {
+    otpBtn.supported_apps.splice(index, 1)
+  }
+}
+
 const template = ref<Template | null>(null)
 const accounts = ref<WhatsAppAccount[]>([])
 const isLoading = ref(true)
@@ -131,6 +185,87 @@ const form = ref({
   body_content: '',
   footer_content: '',
   buttons: [] as any[],
+  sample_values: [] as any[],
+  add_security_recommendation: false,
+  code_expiration_minutes: 0,
+})
+
+// Detect variables in body and header content
+const bodyVariables = computed(() => {
+  const matches = form.value.body_content.match(/\{\{([^}]+)\}\}/g) || []
+  return matches.map(m => m.replace(/\{\{|\}\}/g, '').trim())
+})
+
+const headerVariables = computed(() => {
+  if (form.value.header_type !== 'TEXT') return []
+  const matches = form.value.header_content.match(/\{\{([^}]+)\}\}/g) || []
+  return matches.map(m => m.replace(/\{\{|\}\}/g, '').trim())
+})
+
+const allVariables = computed(() => {
+  const vars: { component: string; name: string; label: string; index: number }[] = []
+  const wrap = (v: string) => '\u007B\u007B' + v + '\u007D\u007D'
+  headerVariables.value.forEach((v, i) => vars.push({ component: 'header', name: v, label: wrap(v), index: i + 1 }))
+  bodyVariables.value.forEach((v, i) => vars.push({ component: 'body', name: v, label: wrap(v), index: i + 1 }))
+  return vars
+})
+
+// Detect mixed variable types (positional + named) which are not allowed
+const hasMixedVariables = computed(() => {
+  const vars = allVariables.value
+  if (vars.length === 0) return false
+  const hasPositional = vars.some(v => /^\d+$/.test(v.name))
+  const hasNamed = vars.some(v => !/^\d+$/.test(v.name))
+  return hasPositional && hasNamed
+})
+
+// Detect duplicate positional variables (e.g. {{1}} used twice) — named params can repeat
+const hasDuplicateVariables = computed(() => {
+  const isPositional = (v: string) => /^\d+$/.test(v)
+  const bodyNums = bodyVariables.value.filter(isPositional)
+  const headerNums = headerVariables.value.filter(isPositional)
+  return bodyNums.length !== new Set(bodyNums).size
+    || headerNums.length !== new Set(headerNums).size
+})
+
+// Detect variables at the start or end of body content (Meta restriction)
+const hasVariableAtEdge = computed(() => {
+  const body = form.value.body_content.trim()
+  if (!body) return false
+  return /^\{\{[^}]+\}\}/.test(body) || /\{\{[^}]+\}\}$/.test(body)
+})
+
+// Meta allows at most one variable in a TEXT header. Count unique names so
+// {{name}} … {{name}} (same variable referenced twice) still passes.
+const hasTooManyHeaderVariables = computed(() => {
+  if (form.value.header_type !== 'TEXT') return false
+  return new Set(headerVariables.value).size > 1
+})
+
+// Build sample_values array from form inputs
+function getSampleValueForVar(component: string, index: number): string {
+  const sv = form.value.sample_values.find(
+    (s: any) => s.component === component && s.index === index
+  )
+  return sv?.value || ''
+}
+
+function setSampleValueForVar(component: string, index: number, value: string) {
+  const existing = form.value.sample_values.findIndex(
+    (s: any) => s.component === component && s.index === index
+  )
+  if (existing >= 0) {
+    form.value.sample_values[existing].value = value
+  } else {
+    form.value.sample_values.push({ component, index, value })
+  }
+}
+
+// Sync sample_values when variables change — remove stale entries
+watch(allVariables, (vars) => {
+  form.value.sample_values = form.value.sample_values.filter((sv: any) =>
+    vars.some(v => v.component === sv.component && v.index === sv.index)
+  )
 })
 
 const buttonTypes = [
@@ -275,6 +410,9 @@ function syncForm() {
       ...b,
       example: Array.isArray(b.example) ? b.example[0] ?? '' : b.example,
     })),
+    sample_values: template.value.sample_values || [],
+    add_security_recommendation: template.value.add_security_recommendation || false,
+    code_expiration_minutes: template.value.code_expiration_minutes || 0,
   }
   // Restore media handle for existing media headers
   headerMediaFile.value = null
@@ -296,28 +434,85 @@ watch(form, () => {
   hasChanges.value = true
 }, { deep: true })
 
+// Auto-configure form when switching to/from AUTHENTICATION category
+watch(() => form.value.category, (newCat, oldCat) => {
+  if (newCat === 'AUTHENTICATION' && oldCat !== 'AUTHENTICATION') {
+    form.value.header_type = 'NONE'
+    form.value.header_content = ''
+    form.value.body_content = ''
+    form.value.footer_content = ''
+    form.value.buttons = [{ type: 'OTP', text: 'Copy code', otp_type: 'COPY_CODE' }]
+  } else if (newCat !== 'AUTHENTICATION' && oldCat === 'AUTHENTICATION') {
+    form.value.add_security_recommendation = false
+    form.value.code_expiration_minutes = 0
+  }
+})
+
 async function save() {
   if (!form.value.name.trim()) {
     toast.error(t('templates.nameRequired', 'Template name is required'))
     return
   }
-  if (!form.value.body_content.trim()) {
+  if (!isAuthentication.value && !form.value.body_content.trim()) {
     toast.error(t('templates.bodyRequired', 'Body content is required'))
     return
   }
+  if (!isAuthentication.value
+    && ['IMAGE', 'VIDEO', 'DOCUMENT'].includes(form.value.header_type)
+    && !form.value.header_content) {
+    const fallback = `Upload a sample ${form.value.header_type.toLowerCase()} before saving — Meta requires it for template approval.`
+    toast.error(t('templates.headerMediaRequired', fallback))
+    return
+  }
+  if (!isAuthentication.value) {
+    if (hasMixedVariables.value) {
+      toast.error(t('templates.mixedVariables', 'Cannot mix positional ({{1}}, {{2}}) and named ({{name}}) variables. Use one type only.'))
+      return
+    }
+    if (hasDuplicateVariables.value) {
+      toast.error(t('templates.duplicateVariables', 'Duplicate variables found. Each variable should appear only once.'))
+      return
+    }
+    if (hasVariableAtEdge.value) {
+      toast.error(t('templates.variableAtEdge', 'Variables cannot be at the very start or end of the template body.'))
+      return
+    }
+    if (hasTooManyHeaderVariables.value) {
+      toast.error(t('templates.headerTooManyVariables', headerTooManyVariablesHint))
+      return
+    }
+  }
+  if (isAuthentication.value && form.value.code_expiration_minutes && (form.value.code_expiration_minutes < 1 || form.value.code_expiration_minutes > 90)) {
+    toast.error(t('templates.invalidExpiration', 'Code expiration must be between 1 and 90 minutes'))
+    return
+  }
+  if (isAuthentication.value && authOtpType.value === 'ZERO_TAP' && !zeroTapAccepted.value) {
+    toast.error(t('templates.zeroTapTosRequired', 'You must accept the Terms of Service to use zero-tap authentication'))
+    return
+  }
+  if (isAuthentication.value && (authOtpType.value === 'ONE_TAP' || authOtpType.value === 'ZERO_TAP')) {
+    const apps = form.value.buttons[0]?.supported_apps || []
+    if (apps.length === 0 || apps.some((a: any) => !a.package_name?.trim() || !a.signature_hash?.trim())) {
+      toast.error(t('templates.supportedAppsRequired', 'Package name and signature hash are required for all supported apps'))
+      return
+    }
+  }
   isSaving.value = true
   try {
-    const payload = {
+    const payload: Record<string, any> = {
       whatsapp_account: form.value.whatsapp_account,
       name: form.value.name,
       display_name: form.value.display_name,
       language: form.value.language,
       category: form.value.category,
-      header_type: form.value.header_type,
-      header_content: form.value.header_type === 'TEXT' ? form.value.header_content : '',
-      body_content: form.value.body_content,
-      footer_content: form.value.footer_content,
+      header_type: isAuthentication.value ? 'NONE' : form.value.header_type,
+      header_content: isAuthentication.value ? '' : form.value.header_content,
+      body_content: isAuthentication.value ? '{{1}} is your verification code.' : form.value.body_content,
+      footer_content: isAuthentication.value ? '' : form.value.footer_content,
       buttons: form.value.buttons,
+      sample_values: form.value.sample_values,
+      add_security_recommendation: form.value.add_security_recommendation,
+      code_expiration_minutes: form.value.code_expiration_minutes || 0,
     }
 
     if (isNew.value) {
@@ -416,7 +611,25 @@ async function confirmPublish() {
   }
 }
 
+// Replace template variables with sample values for preview
+function replaceVariablesWithSamples(text: string, component: string): string {
+  if (!text) return text
+  const samples = form.value.sample_values || []
+  return text.replace(/\{\{([^}]+)\}\}/g, (_match, varName: string) => {
+    const trimmed = varName.trim()
+    const isPositional = /^\d+$/.test(trimmed)
+    const index = isPositional ? parseInt(trimmed) : 0
+    const sv = samples.find((s: any) => {
+      if (s.component !== component) return false
+      if (isPositional) return s.index === index
+      return s.param_name === trimmed || s.index === index
+    })
+    return sv?.value || `[${trimmed}]`
+  })
+}
 
+const previewBody = computed(() => replaceVariablesWithSamples(form.value.body_content, 'body'))
+const previewHeader = computed(() => replaceVariablesWithSamples(form.value.header_content, 'header'))
 
 async function loadFlows() {
   try {
@@ -487,6 +700,9 @@ onMounted(async () => {
             <Badge v-if="!isNew && template?.status" :variant="statusVariant">
               {{ template.status }}
             </Badge>
+            <Badge v-if="!isNew && template?.quality_rating" :class="getQualityBadgeClass(template.quality_rating)">
+              {{ getQualityRatingLabel(template.quality_rating, t) }}
+            </Badge>
           </div>
           <ChevronDown class="h-4 w-4 text-muted-foreground transition-transform" :class="isDetailsOpen && 'rotate-180'" />
         </div>
@@ -547,7 +763,7 @@ onMounted(async () => {
         <CardTitle class="text-sm font-medium">{{ $t('templates.content', 'Content') }}</CardTitle>
       </CardHeader>
       <CardContent class="space-y-4">
-        <div class="space-y-1.5">
+        <div v-if="!isAuthentication" class="space-y-1.5">
           <Label class="text-xs">{{ $t('templates.headerType', 'Header Type') }}</Label>
           <Select v-model="form.header_type" :disabled="!canWrite || !isEditable">
             <SelectTrigger><SelectValue /></SelectTrigger>
@@ -559,8 +775,9 @@ onMounted(async () => {
           </Select>
         </div>
         <div v-if="form.header_type === 'TEXT'" class="space-y-1.5">
-          <Label class="text-xs">{{ $t('templates.headerContent', 'Header Content') }}</Label>
-          <Input v-model="form.header_content" :disabled="!canWrite || !isEditable" />
+          <Label class="text-xs" for="header-content">{{ $t('templates.headerContent', 'Header Content') }}</Label>
+          <Input id="header-content" v-model="form.header_content" :disabled="!canWrite || !isEditable" />
+          <p v-if="hasTooManyHeaderVariables" class="text-xs text-destructive" v-text="headerTooManyVariablesHint" />
         </div>
 
         <!-- Header Media Upload for IMAGE/VIDEO/DOCUMENT -->
@@ -580,7 +797,7 @@ onMounted(async () => {
               type="button"
               size="sm"
               @click="uploadHeaderMedia"
-              :disabled="!headerMediaFile || headerMediaUploading || !form.whatsapp_account"
+              :disabled="!headerMediaFile || headerMediaUploading"
             >
               <Loader2 v-if="headerMediaUploading" class="h-3.5 w-3.5 mr-1 animate-spin" />
               <Upload v-else class="h-3.5 w-3.5 mr-1" />
@@ -606,18 +823,197 @@ onMounted(async () => {
           </p>
         </div>
 
-        <div class="space-y-1.5">
+        <!-- Authentication template: fixed body & options -->
+        <div v-if="isAuthentication" class="space-y-4">
+          <!-- OTP Code Delivery Method -->
+          <div class="space-y-2">
+            <Label class="text-xs">{{ $t('templates.codeDelivery', 'Code Delivery Method') }}</Label>
+            <Select :model-value="authOtpType" @update:model-value="setAuthOtpType" :disabled="!canWrite || !isEditable">
+              <SelectTrigger class="h-8 text-xs">
+                <SelectValue placeholder="Select delivery method" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="COPY_CODE">Copy Code</SelectItem>
+                <SelectItem value="ONE_TAP">One-Tap Autofill (Android only)</SelectItem>
+                <SelectItem value="ZERO_TAP">Zero-Tap (Android only)</SelectItem>
+              </SelectContent>
+            </Select>
+            <p class="text-xs text-muted-foreground">
+              <span v-if="authOtpType === 'COPY_CODE'">User taps a button to copy the code to clipboard.</span>
+              <span v-else-if="authOtpType === 'ONE_TAP'">User taps a button to autofill the code in your app. Requires app configuration.</span>
+              <span v-else-if="authOtpType === 'ZERO_TAP'">Code is delivered to your app automatically. Requires app configuration.</span>
+            </p>
+          </div>
+
+          <div class="space-y-1.5">
+            <Label class="text-xs">{{ $t('templates.bodyContent', 'Body Content') }}</Label>
+            <div class="rounded-md border bg-muted/50 p-3 text-sm text-muted-foreground">
+              <span class="font-mono">{'{{1}}'}</span> is your verification code.
+              <span v-if="form.add_security_recommendation" class="block mt-1">For your security, do not share this code.</span>
+            </div>
+            <p class="text-xs text-muted-foreground">Authentication templates use fixed preset text defined by Meta.</p>
+          </div>
+          <div class="flex items-center gap-2">
+            <input
+              id="security-rec"
+              type="checkbox"
+              v-model="form.add_security_recommendation"
+              :disabled="!canWrite || !isEditable"
+              class="h-4 w-4 rounded border-gray-300"
+            />
+            <Label for="security-rec" class="text-xs cursor-pointer">{{ $t('templates.addSecurityRecommendation', 'Add security recommendation') }}</Label>
+          </div>
+          <div class="space-y-2">
+            <div class="flex items-center gap-2">
+              <input
+                id="code-expiration"
+                type="checkbox"
+                :checked="form.code_expiration_minutes > 0"
+                @change="form.code_expiration_minutes = ($event.target as HTMLInputElement).checked ? 10 : 0"
+                :disabled="!canWrite || !isEditable"
+                class="h-4 w-4 rounded border-gray-300"
+              />
+              <Label for="code-expiration" class="text-xs cursor-pointer">{{ $t('templates.addCodeExpiration', 'Add expiration time for the code') }}</Label>
+            </div>
+            <div v-if="form.code_expiration_minutes > 0" class="flex items-center gap-2 ml-6">
+              <Input
+                type="number"
+                :model-value="form.code_expiration_minutes"
+                @update:model-value="(val: string) => form.code_expiration_minutes = val ? parseInt(val) : 0"
+                min="1"
+                max="90"
+                class="h-8 text-xs w-24"
+                :disabled="!canWrite || !isEditable"
+              />
+              <span class="text-xs text-muted-foreground">minutes (1-90)</span>
+            </div>
+            <p v-if="form.code_expiration_minutes > 0" class="text-xs text-muted-foreground ml-6">
+              Footer: "This code expires in {{ form.code_expiration_minutes }} minutes."
+            </p>
+          </div>
+          <!-- Zero-Tap Terms of Service -->
+          <div v-if="authOtpType === 'ZERO_TAP'" class="border border-amber-500/30 bg-amber-500/5 rounded-lg p-3">
+            <div class="flex items-start gap-2">
+              <input
+                id="zero-tap-tos"
+                type="checkbox"
+                v-model="zeroTapAccepted"
+                :disabled="!canWrite || !isEditable"
+                class="h-4 w-4 mt-0.5 rounded border-gray-300"
+              />
+              <Label for="zero-tap-tos" class="text-xs cursor-pointer leading-relaxed">
+                By selecting zero-tap, I understand that my business's use of zero-tap authentication is subject to the
+                <a href="https://www.whatsapp.com/legal/business-terms/" target="_blank" class="underline text-primary">WhatsApp Business Terms of Service</a>.
+                It is my business's responsibility to ensure its customers expect that the code will be automatically filled in on their behalf when they choose to receive the zero-tap code through WhatsApp.
+              </Label>
+            </div>
+          </div>
+
+          <!-- ONE_TAP: autofill text + supported apps -->
+          <div v-if="authOtpType === 'ONE_TAP'" class="space-y-3 border rounded-lg p-3">
+            <div class="space-y-1">
+              <Label class="text-xs">{{ $t('templates.autofillText', 'Autofill Text') }}</Label>
+              <Input v-model="form.buttons[0].autofill_text" placeholder="Autofill" class="h-8 text-xs" :disabled="!canWrite || !isEditable" />
+            </div>
+            <div class="space-y-2">
+              <div class="flex items-center justify-between">
+                <Label class="text-xs">{{ $t('templates.supportedApps', 'Supported Apps') }} *</Label>
+                <Button
+                  v-if="canWrite && isEditable && (form.buttons[0]?.supported_apps?.length || 0) < 5"
+                  type="button" variant="outline" size="xs" class="h-6 text-xs"
+                  @click="addSupportedApp"
+                >
+                  <Plus class="h-3 w-3 mr-1" /> Add App
+                </Button>
+              </div>
+              <div v-for="(app, i) in form.buttons[0]?.supported_apps || []" :key="i" class="flex items-end gap-2">
+                <div class="flex-1 space-y-1">
+                  <Label class="text-xs">Package Name *</Label>
+                  <Input v-model="app.package_name" placeholder="com.example.app" class="h-8 text-xs" :disabled="!canWrite || !isEditable" />
+                </div>
+                <div class="flex-1 space-y-1">
+                  <Label class="text-xs">Signature Hash *</Label>
+                  <Input v-model="app.signature_hash" placeholder="K8a/AINcGX7" class="h-8 text-xs" :disabled="!canWrite || !isEditable" />
+                </div>
+                <Button
+                  v-if="canWrite && isEditable && (form.buttons[0]?.supported_apps?.length || 0) > 1"
+                  type="button" variant="ghost" size="sm" class="h-8 w-8 p-0 shrink-0"
+                  @click="removeSupportedApp(Number(i))"
+                >
+                  <X class="h-3.5 w-3.5 text-destructive" />
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          <!-- ZERO_TAP: supported apps -->
+          <div v-if="authOtpType === 'ZERO_TAP'" class="space-y-3 border rounded-lg p-3">
+            <div class="space-y-2">
+              <div class="flex items-center justify-between">
+                <Label class="text-xs">{{ $t('templates.supportedApps', 'Supported Apps') }} *</Label>
+                <Button
+                  v-if="canWrite && isEditable && (form.buttons[0]?.supported_apps?.length || 0) < 5"
+                  type="button" variant="outline" size="xs" class="h-6 text-xs"
+                  @click="addSupportedApp"
+                >
+                  <Plus class="h-3 w-3 mr-1" /> Add App
+                </Button>
+              </div>
+              <div v-for="(app, i) in form.buttons[0]?.supported_apps || []" :key="i" class="flex items-end gap-2">
+                <div class="flex-1 space-y-1">
+                  <Label class="text-xs">Package Name *</Label>
+                  <Input v-model="app.package_name" placeholder="com.example.app" class="h-8 text-xs" :disabled="!canWrite || !isEditable" />
+                </div>
+                <div class="flex-1 space-y-1">
+                  <Label class="text-xs">Signature Hash *</Label>
+                  <Input v-model="app.signature_hash" placeholder="K8a/AINcGX7" class="h-8 text-xs" :disabled="!canWrite || !isEditable" />
+                </div>
+                <Button
+                  v-if="canWrite && isEditable && (form.buttons[0]?.supported_apps?.length || 0) > 1"
+                  type="button" variant="ghost" size="sm" class="h-8 w-8 p-0 shrink-0"
+                  @click="removeSupportedApp(Number(i))"
+                >
+                  <X class="h-3.5 w-3.5 text-destructive" />
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Standard template: editable body -->
+        <div v-else class="space-y-1.5">
           <Label class="text-xs">{{ $t('templates.bodyContent', 'Body Content') }} *</Label>
           <Textarea
             v-model="form.body_content"
             :rows="6"
             :disabled="!canWrite || !isEditable"
           />
-          <p class="text-xs text-muted-foreground" v-text="bodyHint" />
+          <p v-if="hasMixedVariables" class="text-xs text-destructive" v-text="mixedVariablesHint" />
+          <p v-else-if="hasDuplicateVariables" class="text-xs text-destructive" v-text="duplicateVariablesHint" />
+          <p v-else-if="hasVariableAtEdge" class="text-xs text-destructive" v-text="variablePositionHint" />
+          <p v-else class="text-xs text-muted-foreground" v-text="bodyHint" />
         </div>
 
-        <!-- Buttons -->
-        <div class="space-y-3">
+        <!-- Sample Values for Variables -->
+        <div v-if="!isAuthentication && allVariables.length > 0" class="space-y-3">
+          <div>
+            <Label class="text-xs">{{ $t('templates.sampleValues', 'Sample Values for Variables') }}</Label>
+            <p class="text-xs text-muted-foreground mt-0.5">{{ $t('templates.sampleValuesHint', 'Provide example values for your variables. This helps Meta review and approve your template faster.') }}</p>
+          </div>
+          <div v-for="v in allVariables" :key="`${v.component}-${v.index}`" class="flex items-center gap-3">
+            <span class="text-xs text-muted-foreground w-28 shrink-0 font-mono">{{ v.component }}:{{ v.label }}</span>
+            <Input
+              :model-value="getSampleValueForVar(v.component, v.index)"
+              @update:model-value="(val: string) => setSampleValueForVar(v.component, v.index, val)"
+              :placeholder="$t('templates.sampleValuePlaceholder', 'e.g. John Doe')"
+              class="h-8 text-xs"
+              :disabled="!canWrite || !isEditable"
+            />
+          </div>
+        </div>
+
+        <!-- Buttons (hidden for auth templates — OTP managed via selector above) -->
+        <div v-if="!isAuthentication" class="space-y-3">
           <div class="flex items-center justify-between">
             <Label class="text-xs">{{ $t('templates.buttons', 'Buttons') }} <span class="text-muted-foreground font-normal">({{ $t('templates.maxButtonsHint', 'up to 3, optional') }})</span></Label>
             <Button
@@ -745,7 +1141,7 @@ onMounted(async () => {
           </div>
         </div>
 
-        <div class="space-y-1.5">
+        <div v-if="!isAuthentication" class="space-y-1.5">
           <Label class="text-xs">{{ $t('templates.footerContent', 'Footer Content') }}</Label>
           <Textarea
             v-model="form.footer_content"
@@ -820,13 +1216,13 @@ onMounted(async () => {
         <div class="bg-gray-800 light:bg-[#e5ddd5] rounded-lg p-4">
           <div class="bg-gray-700 light:bg-white rounded-lg shadow max-w-[280px] overflow-hidden">
             <div v-if="template.header_type && template.header_type !== 'NONE'" class="p-3 border-b">
-              <div v-if="template.header_type === 'TEXT'" class="font-semibold">{{ template.header_content }}</div>
+              <div v-if="template.header_type === 'TEXT'" class="font-semibold">{{ previewHeader }}</div>
               <div v-else class="h-32 bg-gray-600 light:bg-gray-200 rounded flex items-center justify-center">
                 <span class="text-sm text-gray-400">{{ template.header_type }}</span>
               </div>
             </div>
             <div class="p-3">
-              <p class="text-sm whitespace-pre-wrap">{{ template.body_content }}</p>
+              <p class="text-sm whitespace-pre-wrap">{{ previewBody }}</p>
             </div>
             <div v-if="template.footer_content" class="px-3 pb-3">
               <p class="text-xs text-gray-500">{{ template.footer_content }}</p>
@@ -844,6 +1240,12 @@ onMounted(async () => {
           <div class="flex justify-between">
             <span class="text-muted-foreground">{{ $t('templates.status', 'Status') }}:</span>
             <Badge :variant="statusVariant">{{ template.status }}</Badge>
+          </div>
+          <div v-if="template.quality_rating" class="flex justify-between">
+            <span class="text-muted-foreground">{{ $t('templates.qualityRating', 'Quality Rating') }}:</span>
+            <Badge :class="getQualityBadgeClass(template.quality_rating)">
+              {{ getQualityRatingLabel(template.quality_rating, t) }}
+            </Badge>
           </div>
           <div class="flex justify-between">
             <span class="text-muted-foreground">{{ $t('templates.category', 'Category') }}:</span>

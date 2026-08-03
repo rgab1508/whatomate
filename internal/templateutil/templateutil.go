@@ -9,6 +9,51 @@ import (
 // ParameterPattern matches template parameters like {{1}}, {{name}}, {{order_id}}
 var ParameterPattern = regexp.MustCompile(`\{\{([^}]+)\}\}`)
 
+// isPositionalParam returns true if the parameter name is purely numeric (e.g. "1", "2").
+func isPositionalParam(name string) bool {
+	for _, c := range name {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return len(name) > 0
+}
+
+// ValidateHeaderParamCount enforces Meta's restriction that a TEXT header may
+// contain at most one variable ({{...}}); duplicate references to the same
+// variable name still count as one. Callers should only invoke this for
+// HeaderType == "TEXT".
+func ValidateHeaderParamCount(content string) error {
+	names := ExtParamNames(content)
+	if len(names) > 1 {
+		return fmt.Errorf("header text may contain at most one variable; found %d", len(names))
+	}
+	return nil
+}
+
+// ValidateNoMixedParams checks that content does not mix positional ({{1}}) and
+// named ({{name}}) parameters. Returns an error if both types are present.
+func ValidateNoMixedParams(content string) error {
+	names := ExtParamNames(content)
+	if len(names) == 0 {
+		return nil
+	}
+
+	hasPositional := false
+	hasNamed := false
+	for _, n := range names {
+		if isPositionalParam(n) {
+			hasPositional = true
+		} else {
+			hasNamed = true
+		}
+		if hasPositional && hasNamed {
+			return fmt.Errorf("template cannot mix positional ({{1}}, {{2}}) and named ({{name}}) parameters")
+		}
+	}
+	return nil
+}
+
 // ExtParamNames extracts parameter names from template content.
 // Supports both positional ({{1}}, {{2}}) and named ({{name}}, {{order_id}}) parameters.
 // Returns parameter names in order of first occurrence, without duplicates.

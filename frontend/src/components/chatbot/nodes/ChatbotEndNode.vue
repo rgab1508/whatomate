@@ -1,35 +1,27 @@
 <script setup lang="ts">
-import { Flag } from 'lucide-vue-next'
+import { computed } from 'vue'
+import { StopCircle } from 'lucide-vue-next'
 import BaseNode from '@/components/calling/nodes/BaseNode.vue'
 
 defineOptions({ inheritAttrs: false })
-defineProps<{ data: any }>()
+
+const props = defineProps<{ data: any }>()
+
+const completionMessage = computed(() => {
+  const msg = props.data?.config?.message || ''
+  return msg.length > 60 ? msg.slice(0, 60) + '...' : msg
+})
 </script>
 
 <template>
   <BaseNode
-    label="END"
-    header-class="bg-red-600"
+    :label="data?.label || 'End'"
+    header-class="bg-slate-600"
     :output-handles="[]"
-    :has-input="true"
-    :data="data"
+    :has-input="!data?.isEntryNode"
   >
-    <template #icon><Flag class="w-4 h-4" /></template>
-    <div class="flex flex-col items-center py-2">
-      <div
-        :class="[
-          'w-12 h-12 rounded-full flex items-center justify-center shadow-md transition-all',
-          data?.isUnreachable ? 'bg-gray-400 opacity-50' : 'bg-red-500'
-        ]"
-      >
-        <Flag class="h-6 w-6 text-white" />
-      </div>
-      <p v-if="data?.isUnreachable" class="text-[10px] text-red-600 mt-2 text-center">
-        Flow has no exit path - will loop forever
-      </p>
-      <p v-else-if="data?.somePathsLoop" class="text-[10px] text-amber-600 mt-2 text-center">
-        Some paths never reach END
-      </p>
-    </div>
+    <template #icon><StopCircle class="w-4 h-4" /></template>
+    <p v-if="completionMessage" class="truncate" :title="data?.config?.message || ''">{{ completionMessage }}</p>
+    <p v-else>End of flow</p>
   </BaseNode>
 </template>

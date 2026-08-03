@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"maps"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -18,13 +18,36 @@ import (
 	"github.com/shridarpatil/whatomate/pkg/whatsapp"
 )
 
+func redactURLForLog(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return "<invalid_url>"
+	}
+
+	if parsed.Scheme == "" || parsed.Host == "" {
+		return parsed.Path
+	}
+
+	return parsed.Scheme + "://" + parsed.Host + parsed.Path
+}
+
+func truncateLogValue(value string, maxLen int) string {
+	if len(value) <= maxLen {
+		return value
+	}
+
+	return value[:maxLen] + "...(truncated)"
+}
+
 // IncomingTextMessage represents a text, interactive, or media message from the webhook
 type IncomingTextMessage struct {
-	From      string `json:"from"`
-	ID        string `json:"id"`
-	Timestamp string `json:"timestamp"`
-	Type      string `json:"type"`
-	Text      *struct {
+	From       string `json:"from"`
+	FromUserID string `json:"from_user_id,omitempty"` // BSUID
+	To         string `json:"to,omitempty"`
+	ID         string `json:"id"`
+	Timestamp  string `json:"timestamp"`
+	Type       string `json:"type"`
+	Text       *struct {
 		Body string `json:"body"`
 	} `json:"text,omitempty"`
 	Interactive *struct {
@@ -43,6 +66,12 @@ type IncomingTextMessage struct {
 			Body         string `json:"body"`
 			Name         string `json:"name"`
 		} `json:"nfm_reply,omitempty"`
+		CallPermissionReply *struct {
+			Response            string      `json:"response"`
+			IsPermanent         bool        `json:"is_permanent"`
+			ExpirationTimestamp json.Number `json:"expiration_timestamp,omitempty"`
+			ResponseSource      string      `json:"response_source"`
+		} `json:"call_permission_reply,omitempty"`
 	} `json:"interactive,omitempty"`
 	Image *struct {
 		ID       string `json:"id"`
@@ -127,7 +156,17 @@ func (a *App) processIncomingMessageFull(phoneNumberID, displayPhoneNumber strin
 	}
 
 	// Get or create contact (always do this for all incoming messages)
-	contact, isNewContact, _ := contactutil.GetOrCreateContact(a.DB, account.OrganizationID, msg.From, profileName)
+	contact, isNewContact, err := contactutil.GetOrCreateContact(a.DB, account.OrganizationID, msg.From, profileName)
+	if err != nil {
+		a.Log.Error("Failed to get or create contact", "from", msg.From, "error", err)
+		return
+	}
+
+	// Store BSUID if provided and not already set
+	if msg.FromUserID != "" && contact.BSUID != msg.FromUserID {
+		a.DB.Model(contact).Update("bsuid", msg.FromUserID)
+		contact.BSUID = msg.FromUserID
+	}
 
 	// Dispatch webhook if new contact was created
 	if isNewContact {
@@ -140,153 +179,12 @@ func (a *App) processIncomingMessageFull(phoneNumberID, displayPhoneNumber strin
 	}
 
 	// Get message content - handle text, button replies, list replies, and media
-	messageText := ""
-	messageType := msg.Type
-	buttonID := "" // Track button/list ID for conditional routing
-	var mediaInfo *MediaInfo
-
-	// Track flow response data for WhatsApp Flow forms
-	var flowResponseData map[string]any
-
-	if msg.Type == "text" && msg.Text != nil {
-		messageText = msg.Text.Body
-	} else if msg.Type == "button" && msg.Button != nil {
-		// Template quick_reply button click — WhatsApp sends type "button"
-		messageText = msg.Button.Text
-		buttonID = msg.Button.Payload
-		messageType = "button_reply"
-	} else if msg.Type == "interactive" && msg.Interactive != nil {
-		// Handle button reply
-		if msg.Interactive.ButtonReply != nil {
-			messageText = msg.Interactive.ButtonReply.Title
-			buttonID = msg.Interactive.ButtonReply.ID
-			messageType = "button_reply"
-		}
-		// Handle list reply
-		if msg.Interactive.ListReply != nil {
-			messageText = msg.Interactive.ListReply.Title
-			buttonID = msg.Interactive.ListReply.ID
-			messageType = "button_reply"
-		}
-		// Handle WhatsApp Flow reply (nfm_reply)
-		if msg.Interactive.NFMReply != nil {
-			messageText = msg.Interactive.NFMReply.Body
-			messageType = "nfm_reply"
-			// Parse the response JSON to extract form data
-			if msg.Interactive.NFMReply.ResponseJSON != "" {
-				var responseData map[string]any
-				if err := json.Unmarshal([]byte(msg.Interactive.NFMReply.ResponseJSON), &responseData); err != nil {
-					a.Log.Error("Failed to parse flow response JSON", "error", err, "response_json", msg.Interactive.NFMReply.ResponseJSON)
-				} else {
-					flowResponseData = responseData
-					a.Log.Info("Parsed WhatsApp Flow response", "data", flowResponseData)
-				}
-			}
-		}
-	} else if msg.Type == "button" && msg.Button != nil {
-		// Handle template quick reply button click
-		messageText = msg.Button.Text
-		buttonID = msg.Button.Payload
-		messageType = "button_reply"
-	} else if msg.Type == "image" && msg.Image != nil {
-		// Handle image message
-		messageText = msg.Image.Caption
-		mediaInfo = &MediaInfo{
-			MediaMimeType: msg.Image.MimeType,
-		}
-		// Download and save media locally
-		waAccount := a.toWhatsAppAccount(account)
-		if localPath, err := a.DownloadAndSaveMedia(context.Background(), msg.Image.ID, msg.Image.MimeType, waAccount); err != nil {
-			a.Log.Error("Failed to download image", "error", err, "media_id", msg.Image.ID)
-		} else {
-			mediaInfo.MediaURL = localPath
-		}
-	} else if msg.Type == "document" && msg.Document != nil {
-		// Handle document message
-		messageText = msg.Document.Caption
-		mediaInfo = &MediaInfo{
-			MediaMimeType: msg.Document.MimeType,
-			MediaFilename: msg.Document.Filename,
-		}
-		// Download and save media locally
-		waAccount := a.toWhatsAppAccount(account)
-		if localPath, err := a.DownloadAndSaveMedia(context.Background(), msg.Document.ID, msg.Document.MimeType, waAccount); err != nil {
-			a.Log.Error("Failed to download document", "error", err, "media_id", msg.Document.ID)
-		} else {
-			mediaInfo.MediaURL = localPath
-		}
-	} else if msg.Type == "video" && msg.Video != nil {
-		// Handle video message
-		messageText = msg.Video.Caption
-		mediaInfo = &MediaInfo{
-			MediaMimeType: msg.Video.MimeType,
-		}
-		// Download and save media locally
-		waAccount := a.toWhatsAppAccount(account)
-		if localPath, err := a.DownloadAndSaveMedia(context.Background(), msg.Video.ID, msg.Video.MimeType, waAccount); err != nil {
-			a.Log.Error("Failed to download video", "error", err, "media_id", msg.Video.ID)
-		} else {
-			mediaInfo.MediaURL = localPath
-		}
-	} else if msg.Type == "audio" && msg.Audio != nil {
-		// Handle audio message
-		mediaInfo = &MediaInfo{
-			MediaMimeType: msg.Audio.MimeType,
-		}
-		// Download and save media locally
-		waAccount := a.toWhatsAppAccount(account)
-		if localPath, err := a.DownloadAndSaveMedia(context.Background(), msg.Audio.ID, msg.Audio.MimeType, waAccount); err != nil {
-			a.Log.Error("Failed to download audio", "error", err, "media_id", msg.Audio.ID)
-		} else {
-			mediaInfo.MediaURL = localPath
-		}
-	} else if msg.Type == "sticker" && msg.Sticker != nil {
-		// Handle sticker message (treat like image)
-		mediaInfo = &MediaInfo{
-			MediaMimeType: msg.Sticker.MimeType,
-		}
-		// Download and save media locally
-		waAccount := a.toWhatsAppAccount(account)
-		if localPath, err := a.DownloadAndSaveMedia(context.Background(), msg.Sticker.ID, msg.Sticker.MimeType, waAccount); err != nil {
-			a.Log.Error("Failed to download sticker", "error", err, "media_id", msg.Sticker.ID)
-		} else {
-			mediaInfo.MediaURL = localPath
-		}
-	} else if msg.Type == "location" && msg.Location != nil {
-		// Handle location message - store as JSON in content
-		locationData := map[string]any{
-			"latitude":  msg.Location.Latitude,
-			"longitude": msg.Location.Longitude,
-		}
-		if msg.Location.Name != "" {
-			locationData["name"] = msg.Location.Name
-		}
-		if msg.Location.Address != "" {
-			locationData["address"] = msg.Location.Address
-		}
-		if jsonBytes, err := json.Marshal(locationData); err == nil {
-			messageText = string(jsonBytes)
-		}
-	} else if msg.Type == "contacts" && len(msg.Contacts) > 0 {
-		// Handle contacts message - store as JSON in content
-		contactsData := make([]map[string]any, 0, len(msg.Contacts))
-		for _, c := range msg.Contacts {
-			contact := map[string]any{
-				"name": c.Name.FormattedName,
-			}
-			if len(c.Phones) > 0 {
-				phones := make([]string, 0, len(c.Phones))
-				for _, p := range c.Phones {
-					phones = append(phones, p.Phone)
-				}
-				contact["phones"] = phones
-			}
-			contactsData = append(contactsData, contact)
-		}
-		if jsonBytes, err := json.Marshal(contactsData); err == nil {
-			messageText = string(jsonBytes)
-		}
-	}
+	extracted := a.extractMessageContent(context.Background(), msg, account)
+	messageText := extracted.Text
+	messageType := extracted.Type
+	buttonID := extracted.ButtonID
+	mediaInfo := extracted.Media
+	flowResponseData := extracted.FlowResponseData
 
 	// Save incoming message to messages table (always, even if chatbot is disabled)
 	var replyToWAMID string
@@ -381,15 +279,43 @@ func (a *App) processIncomingMessageFull(phoneNumberID, displayPhoneNumber strin
 		return
 	}
 
-	// Check if user is in an active flow
+	// Check if user is in an active flow. After Phase 4.2 every flow has
+	// a v2 Graph populated; any flow without one is a misconfiguration
+	// (manual DB edit or failed backfill) — log and exit cleanly.
 	if session.CurrentFlowID != nil {
-		a.processFlowResponse(account, session, contact, messageText, buttonID, flowResponseData)
+		flow, err := a.getChatbotFlowByIDCached(account.OrganizationID, *session.CurrentFlowID)
+		if err != nil || flow == nil {
+			a.Log.Error("Active chatbot flow not loadable", "error", err, "session", session.ID, "flow", session.CurrentFlowID)
+			a.exitFlow(session)
+			return
+		}
+		if flow.Graph == nil {
+			a.Log.Error("Active chatbot flow has no v2 graph; ignoring inbound", "session", session.ID, "flow", flow.ID)
+			a.exitFlow(session)
+			return
+		}
+		if err := a.runChatGraph(account, contact, session, flow, messageText, buttonID, flowResponseData); err != nil {
+			a.Log.Error("Chat graph runner failed", "error", err, "session", session.ID, "flow", flow.ID)
+		}
 		return
 	}
 
-	// Try to match flow trigger (keywords or button ID)
+	// Try to match flow trigger (keywords or button ID) before greeting, to avoid duplicate messages
 	if flow := a.matchFlowTrigger(account.OrganizationID, account.Name, messageText, buttonID); flow != nil {
-		a.startFlow(account, session, contact, flow)
+		if flow.Graph == nil {
+			a.Log.Error("Triggered chatbot flow has no v2 graph; ignoring", "flow", flow.ID)
+			return
+		}
+		session.CurrentFlowID = &flow.ID
+		session.CurrentStep = ""
+		session.StepRetries = 0
+		session.SessionData = models.JSONB{
+			"_flow_id":   flow.ID.String(),
+			"_flow_name": flow.Name,
+		}
+		if err := a.runChatGraph(account, contact, session, flow, messageText, buttonID, flowResponseData); err != nil {
+			a.Log.Error("Chat graph runner failed at flow start", "error", err, "session", session.ID, "flow", flow.ID)
+		}
 		return
 	}
 
@@ -868,455 +794,6 @@ func (a *App) matchFlowTrigger(orgID uuid.UUID, accountName, messageText, button
 }
 
 // startFlow initiates a chatbot flow for a user
-func (a *App) startFlow(account *models.WhatsAppAccount, session *models.ChatbotSession, contact *models.Contact, flow *models.ChatbotFlow) {
-	a.Log.Info("Starting flow", "flow_id", flow.ID, "flow_name", flow.Name, "contact", contact.PhoneNumber, "num_steps", len(flow.Steps))
-
-	// Log all steps for debugging
-	for i, step := range flow.Steps {
-		a.Log.Info("Flow step", "index", i, "step_name", step.StepName, "step_order", step.StepOrder, "message_type", step.MessageType)
-	}
-
-	// Update session with flow info, preserving existing session data (e.g. webhook payload)
-	session.CurrentFlowID = &flow.ID
-	session.CurrentStep = ""
-	session.StepRetries = 0
-	if session.SessionData == nil {
-		session.SessionData = models.JSONB{}
-	}
-	session.SessionData["_flow_id"] = flow.ID.String()
-	session.SessionData["_flow_name"] = flow.Name
-	a.DB.Save(session)
-
-	// Log flow started
-	a.logFlowEvent(session.ID, flow.ID, "", models.FlowLogFlowStarted,
-		fmt.Sprintf("Flow '%s' started", flow.Name),
-		map[string]interface{}{"flow_name": flow.Name, "num_steps": len(flow.Steps), "contact_phone": contact.PhoneNumber})
-
-	// Send initial message if configured
-	if flow.InitialMessage != "" {
-		initialMsg := processTemplate(flow.InitialMessage, a.buildMessageContext(account, session, contact))
-		if err := a.sendAndSaveTextMessage(account, contact, initialMsg); err != nil {
-			a.Log.Error("Failed to send flow initial message", "error", err, "contact", contact.PhoneNumber)
-		}
-		a.logSessionMessage(session.ID, models.DirectionOutgoing, initialMsg, "flow_start")
-	}
-
-	// Send first step message (with skip check)
-	if len(flow.Steps) > 0 {
-		firstStep := &flow.Steps[0]
-		a.Log.Info("Sending first step", "step_name", firstStep.StepName, "message_type", firstStep.MessageType, "message", firstStep.Message)
-		session.CurrentStep = firstStep.StepName
-		a.DB.Model(session).Update("current_step", firstStep.StepName)
-
-		a.sendStepWithSkipCheck(account, session, contact, firstStep, flow, nil)
-	} else {
-		// No steps, complete the flow
-		a.completeFlow(account, session, contact, flow)
-	}
-}
-
-// processFlowResponse handles user response within a flow
-func (a *App) processFlowResponse(account *models.WhatsAppAccount, session *models.ChatbotSession, contact *models.Contact, userInput string, buttonID string, flowResponseData map[string]any) {
-	// Load the current flow from cache
-	flow, err := a.getChatbotFlowByIDCached(account.OrganizationID, *session.CurrentFlowID)
-	if err != nil {
-		a.Log.Error("Failed to load flow", "error", err)
-		a.exitFlow(session)
-		return
-	}
-
-	// Check for cancel keywords
-	userInputLower := strings.ToLower(userInput)
-	for _, cancelKw := range flow.CancelKeywords {
-		if strings.Contains(userInputLower, strings.ToLower(cancelKw)) {
-			cancelMsg := processTemplate("Flow cancelled.", a.buildMessageContext(account, session, contact))
-			if err := a.sendAndSaveTextMessage(account, contact, cancelMsg); err != nil {
-				a.Log.Error("Failed to send flow cancel message", "error", err, "contact", contact.PhoneNumber)
-			}
-			a.logSessionMessage(session.ID, models.DirectionOutgoing, cancelMsg, "flow_cancel")
-			a.logFlowEvent(session.ID, flow.ID, session.CurrentStep, models.FlowLogFlowCancelled,
-				fmt.Sprintf("Flow cancelled by user input: '%s'", userInput),
-				map[string]interface{}{"cancel_keyword": cancelKw, "user_input": userInput})
-			a.exitFlow(session)
-			return
-		}
-	}
-
-	// Find current step
-	var currentStep *models.ChatbotFlowStep
-	var currentStepIndex int
-	for i, step := range flow.Steps {
-		if step.StepName == session.CurrentStep {
-			currentStep = &flow.Steps[i]
-			currentStepIndex = i
-			break
-		}
-	}
-
-	if currentStep == nil {
-		a.Log.Error("Current step not found", "step_name", session.CurrentStep)
-		a.exitFlow(session)
-		return
-	}
-
-	// Log input received
-	a.logFlowEvent(session.ID, flow.ID, currentStep.StepName, models.FlowLogInputReceived,
-		fmt.Sprintf("User input received at step '%s'", currentStep.StepName),
-		map[string]interface{}{"user_input": userInput, "button_id": buttonID})
-
-	// Validate input if required (skip validation for button/list responses)
-	if currentStep.ValidationRegex != "" && buttonID == "" {
-		re, err := regexp.Compile(currentStep.ValidationRegex)
-		if err == nil && !re.MatchString(userInput) {
-			// Invalid input
-			session.StepRetries++
-			if currentStep.RetryOnInvalid && session.StepRetries < currentStep.MaxRetries {
-				a.DB.Model(session).Update("step_retries", session.StepRetries)
-				errorMsg := currentStep.ValidationError
-				if errorMsg == "" {
-					errorMsg = "Invalid input. Please try again."
-				}
-				errorMsg = processTemplate(errorMsg, a.buildMessageContext(account, session, contact))
-				if err := a.sendAndSaveTextMessage(account, contact, errorMsg); err != nil {
-					a.Log.Error("Failed to send validation error", "error", err, "contact", contact.PhoneNumber)
-				}
-				a.logSessionMessage(session.ID, models.DirectionOutgoing, errorMsg, currentStep.StepName+"_retry")
-				a.logFlowEvent(session.ID, flow.ID, currentStep.StepName, models.FlowLogInputInvalid,
-					fmt.Sprintf("Invalid input at step '%s' (retry %d/%d)", currentStep.StepName, session.StepRetries, currentStep.MaxRetries),
-					map[string]interface{}{"user_input": userInput, "validation_regex": currentStep.ValidationRegex, "retry": session.StepRetries})
-				return
-			}
-			// Max retries exceeded, continue anyway or exit
-			a.Log.Warn("Max retries exceeded", "step", currentStep.StepName)
-		}
-	}
-
-	// Validate location input - ensure user actually sent a location message
-	if currentStep.InputType == models.InputTypeLocation {
-		var locationData map[string]interface{}
-		if err := json.Unmarshal([]byte(userInput), &locationData); err != nil || locationData["latitude"] == nil || locationData["longitude"] == nil {
-			// Not a valid location message
-			session.StepRetries++
-			if currentStep.RetryOnInvalid && session.StepRetries < currentStep.MaxRetries {
-				a.DB.Model(session).Update("step_retries", session.StepRetries)
-				errorMsg := currentStep.ValidationError
-				if errorMsg == "" {
-					errorMsg = "Please share your location using the attachment button → Location."
-				}
-				errorMsg = processTemplate(errorMsg, a.buildMessageContext(account, session, contact))
-				if err := a.sendAndSaveTextMessage(account, contact, errorMsg); err != nil {
-					a.Log.Error("Failed to send location validation error", "error", err, "contact", contact.PhoneNumber)
-				}
-				a.logSessionMessage(session.ID, models.DirectionOutgoing, errorMsg, currentStep.StepName+"_retry")
-				a.logFlowEvent(session.ID, flow.ID, currentStep.StepName, models.FlowLogInputInvalid,
-					fmt.Sprintf("Invalid location input at step '%s' (retry %d/%d)", currentStep.StepName, session.StepRetries, currentStep.MaxRetries),
-					map[string]interface{}{"user_input": userInput, "retry": session.StepRetries})
-				return
-			}
-			a.Log.Warn("Max retries exceeded for location input", "step", currentStep.StepName)
-		} else if currentStep.StoreAs != "" {
-			// Store location as a nested map so {{location.latitude}} works via dot notation
-			sessionData := session.SessionData
-			if sessionData == nil {
-				sessionData = models.JSONB{}
-			}
-			sessionData[currentStep.StoreAs] = locationData
-			sessionData[currentStep.StoreAs+"_lat"] = locationData["latitude"]
-			sessionData[currentStep.StoreAs+"_lng"] = locationData["longitude"]
-			if name, ok := locationData["name"].(string); ok && name != "" {
-				sessionData[currentStep.StoreAs+"_name"] = name
-			}
-			if address, ok := locationData["address"].(string); ok && address != "" {
-				sessionData[currentStep.StoreAs+"_address"] = address
-			}
-			a.DB.Model(session).Update("session_data", sessionData)
-			session.SessionData = sessionData
-		}
-	}
-
-	// Auto-validate button responses when step has buttons configured
-	// Only validate if the step actually has Buttons (i.e., it sent interactive buttons to the user)
-	if len(currentStep.Buttons) > 0 &&
-		(currentStep.InputType == models.InputTypeButton || currentStep.InputType == models.InputTypeSelect || buttonID != "") {
-		isValidButton := false
-		userInputLower := strings.ToLower(userInput)
-
-		// Check if buttonID or userInput matches any configured button
-		for i, btn := range currentStep.Buttons {
-			if btnMap, ok := btn.(map[string]any); ok {
-				btnID, _ := btnMap["id"].(string)
-				btnTitle, _ := btnMap["title"].(string)
-
-				// Auto-generate ID if not set (must match what sendInteractiveButtons does)
-				if btnID == "" {
-					btnID = fmt.Sprintf("btn_%d", i+1)
-				}
-
-				// Match by buttonID (exact match) or by title (case-insensitive)
-				if buttonID != "" && buttonID == btnID {
-					isValidButton = true
-					break
-				}
-				if strings.ToLower(btnTitle) == userInputLower || btnID == userInput {
-					isValidButton = true
-					// Set buttonID if not already set (user typed the button text)
-					if buttonID == "" {
-						buttonID = btnID
-					}
-					break
-				}
-			}
-		}
-
-		if !isValidButton {
-			// Invalid input - silently ignore and wait for a valid button click
-			a.Log.Debug("Ignoring non-button input, waiting for valid button", "buttonID", buttonID, "userInput", userInput, "step", currentStep.StepName)
-			return
-		}
-	}
-
-	// Store the user's response (use buttonID if available, otherwise userInput)
-	// Skip for location inputs - already stored with parsed lat/lng fields above
-	if currentStep.StoreAs != "" && currentStep.InputType != models.InputTypeLocation {
-		sessionData := session.SessionData
-		if sessionData == nil {
-			sessionData = models.JSONB{}
-		}
-		// Store both the ID and the title for button responses
-		if buttonID != "" {
-			sessionData[currentStep.StoreAs] = buttonID
-			sessionData[currentStep.StoreAs+"_title"] = userInput
-		} else {
-			sessionData[currentStep.StoreAs] = userInput
-		}
-		a.DB.Model(session).Update("session_data", sessionData)
-		session.SessionData = sessionData
-
-		// Log input validated
-		logValue := userInput
-		if buttonID != "" {
-			logValue = buttonID
-		}
-		a.logFlowEvent(session.ID, flow.ID, currentStep.StepName, models.FlowLogInputValidated,
-			fmt.Sprintf("Input stored as '%s' at step '%s'", currentStep.StoreAs, currentStep.StepName),
-			map[string]interface{}{"store_as": currentStep.StoreAs, "value": logValue})
-	}
-
-	// Store WhatsApp Flow response data (from nfm_reply)
-	if len(flowResponseData) > 0 {
-		sessionData := session.SessionData
-		if sessionData == nil {
-			sessionData = models.JSONB{}
-		}
-		// Store each field from the flow response in the session
-		for key, value := range flowResponseData {
-			sessionData[key] = value
-			a.Log.Debug("Stored flow response field", "key", key, "value", value)
-		}
-		// Also store the raw flow response for reference
-		sessionData["_flow_response"] = flowResponseData
-		a.DB.Model(session).Update("session_data", sessionData)
-		session.SessionData = sessionData
-		a.Log.Info("Stored WhatsApp Flow response in session", "fields", len(flowResponseData))
-	}
-
-	// Determine next step
-	nextStepName := currentStep.NextStep
-	if nextStepName == "__end__" {
-		a.completeFlow(account, session, contact, flow)
-		return
-	}
-	if nextStepName == "" && currentStepIndex+1 < len(flow.Steps) {
-		candidateName := flow.Steps[currentStepIndex+1].StepName
-		// Don't fall through sequentially into a branch target step
-		if !isBranchTarget(candidateName, flow) {
-			nextStepName = candidateName
-		}
-	}
-
-	// Check conditional next - use buttonID first (for button/list responses), then userInput
-	if len(currentStep.ConditionalNext) > 0 {
-		// Try buttonID first (for interactive responses)
-		if buttonID != "" {
-			if next, ok := currentStep.ConditionalNext[buttonID].(string); ok {
-				nextStepName = next
-			} else if next, ok := currentStep.ConditionalNext[userInput].(string); ok {
-				nextStepName = next
-			} else if defaultNext, ok := currentStep.ConditionalNext["default"].(string); ok {
-				nextStepName = defaultNext
-			}
-		} else {
-			// Text input - try matching the text
-			if next, ok := currentStep.ConditionalNext[userInput].(string); ok {
-				nextStepName = next
-			} else if defaultNext, ok := currentStep.ConditionalNext["default"].(string); ok {
-				nextStepName = defaultNext
-			}
-		}
-	}
-
-	// Move to next step or complete flow
-	if nextStepName == "" || nextStepName == "__end__" {
-		a.completeFlow(account, session, contact, flow)
-		return
-	}
-
-	// Find and execute next step
-	var nextStep *models.ChatbotFlowStep
-	for i, step := range flow.Steps {
-		if step.StepName == nextStepName {
-			nextStep = &flow.Steps[i]
-			break
-		}
-	}
-
-	if nextStep == nil {
-		a.Log.Warn("Next step not found, completing flow", "next_step", nextStepName)
-		a.completeFlow(account, session, contact, flow)
-		return
-	}
-
-	// Update session and send next step message (with skip check)
-	a.DB.Model(session).Updates(map[string]any{
-		"current_step": nextStep.StepName,
-		"step_retries": 0,
-	})
-
-	a.Log.Info("Moving to next step", "nextStep", nextStep.StepName, "skipCondition", nextStep.SkipCondition, "sessionData", session.SessionData)
-	a.sendStepWithSkipCheck(account, session, contact, nextStep, flow, nil)
-}
-
-// completeFlow finishes a flow and sends completion message
-func (a *App) completeFlow(account *models.WhatsAppAccount, session *models.ChatbotSession, contact *models.Contact, flow *models.ChatbotFlow) {
-	a.Log.Info("Completing flow", "flow_id", flow.ID, "session_id", session.ID)
-
-	// Log flow completed
-	a.logFlowEvent(session.ID, flow.ID, "", models.FlowLogFlowCompleted,
-		fmt.Sprintf("Flow '%s' completed", flow.Name),
-		map[string]interface{}{"flow_name": flow.Name, "session_data": session.SessionData})
-
-	// Send completion message
-	if flow.CompletionMessage != "" {
-		message := processTemplate(flow.CompletionMessage, a.buildMessageContext(account, session, contact))
-		if err := a.sendAndSaveTextMessage(account, contact, message); err != nil {
-			a.Log.Error("Failed to send flow completion message", "error", err, "contact", contact.PhoneNumber)
-		}
-		a.logSessionMessage(session.ID, models.DirectionOutgoing, message, "flow_complete")
-	}
-
-	// Execute on-complete action
-	if flow.OnCompleteAction == "webhook" && len(flow.CompletionConfig) > 0 {
-		go a.sendFlowCompletionWebhook(account, flow, session, contact)
-	}
-
-	// Update session (keep current_flow_id for panel config reference)
-	now := time.Now()
-	a.DB.Model(session).Updates(map[string]any{
-		"current_step": "",
-		"status":       models.SessionStatusCompleted,
-		"completed_at": now,
-	})
-
-	// Clear chatbot tracking so SLA doesn't fire after flow completion
-	a.ClearContactChatbotTracking(contact.ID)
-}
-
-// sendFlowCompletionWebhook sends session data to configured webhook URL
-func (a *App) sendFlowCompletionWebhook(account *models.WhatsAppAccount, flow *models.ChatbotFlow, session *models.ChatbotSession, contact *models.Contact) {
-	config := flow.CompletionConfig
-
-	// Get webhook URL (required)
-	webhookURL, ok := config["url"].(string)
-	if !ok || webhookURL == "" {
-		a.Log.Error("Webhook URL not configured", "flow_id", flow.ID)
-		return
-	}
-
-	// Replace variables in URL (supports {{contact.phone_number}}, {{organization.name}}, etc.)
-	webhookCtx := a.buildMessageContext(account, session, contact)
-	webhookURL = processTemplate(webhookURL, webhookCtx)
-
-	// Get HTTP method (default: POST)
-	method := "POST"
-	if m, ok := config["method"].(string); ok && m != "" {
-		method = strings.ToUpper(m)
-	}
-
-	// Build the payload
-	payload := map[string]any{
-		"flow_id":      flow.ID.String(),
-		"flow_name":    flow.Name,
-		"session_id":   session.ID.String(),
-		"phone_number": session.PhoneNumber,
-		"contact_id":   contact.ID.String(),
-		"contact_name": contact.ProfileName,
-		"session_data": session.SessionData,
-		"completed_at": time.Now().UTC().Format(time.RFC3339),
-	}
-
-	// Allow custom body template if provided
-	var bodyReader io.Reader
-	if bodyTemplate, ok := config["body"].(string); ok && bodyTemplate != "" {
-		// Replace variables in body template
-		bodyWithVars := processTemplate(bodyTemplate, webhookCtx)
-		bodyReader = strings.NewReader(bodyWithVars)
-	} else {
-		// Use default payload
-		jsonPayload, err := json.Marshal(payload)
-		if err != nil {
-			a.Log.Error("Failed to marshal webhook payload", "error", err)
-			return
-		}
-		bodyReader = bytes.NewReader(jsonPayload)
-	}
-
-	// Create request
-	req, err := http.NewRequest(method, webhookURL, bodyReader)
-	if err != nil {
-		a.Log.Error("Failed to create webhook request", "error", err)
-		return
-	}
-
-	// Set default headers
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Whatomate-Webhook/1.0")
-
-	// Add custom headers if configured
-	if headers, ok := config["headers"].(map[string]any); ok {
-		for key, value := range headers {
-			if strVal, ok := value.(string); ok {
-				req.Header.Set(key, processTemplate(strVal, webhookCtx))
-			}
-		}
-	}
-
-	// Make the request
-	resp, err := a.HTTPClient.Do(req)
-	if err != nil {
-		a.Log.Error("Webhook request failed", "error", err, "url", webhookURL)
-		return
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		a.Log.Info("Webhook sent successfully",
-			"flow_id", flow.ID,
-			"session_id", session.ID,
-			"status", resp.StatusCode,
-		)
-	} else {
-		a.Log.Error("Webhook returned error",
-			"flow_id", flow.ID,
-			"session_id", session.ID,
-			"status", resp.StatusCode,
-			"response", string(body),
-		)
-	}
-}
-
-// exitFlow ends a flow session (transfer, cancel, or error)
 func (a *App) exitFlow(session *models.ChatbotSession) {
 	now := time.Now()
 	a.DB.Model(session).Updates(map[string]any{
@@ -1331,16 +808,7 @@ func (a *App) exitFlow(session *models.ChatbotSession) {
 }
 
 // closeSession ends the chatbot session and clears contact tracking
-func (a *App) closeSession(session *models.ChatbotSession) {
-	a.DB.Model(session).Updates(map[string]any{
-		"status":       models.SessionStatusCompleted,
-		"completed_at": time.Now(),
-	})
-
-	// Clear chatbot tracking on contact
-	a.ClearContactChatbotTracking(session.ContactID)
-}
-
+// It takes the full flow to find next steps when skipping
 // mergeSessionDataWithContext merges session data with contact/org context for template processing.
 func mergeSessionDataWithContext(sessionData models.JSONB, ctx map[string]interface{}) models.JSONB {
 	merged := make(models.JSONB)
@@ -1420,379 +888,6 @@ func buildChatbotAPIContext(account *models.WhatsAppAccount, contact *models.Con
 	return ctx
 }
 
-// replaceVariables replaces {{variable}} placeholders with session data values
-func (a *App) replaceVariables(message string, data models.JSONB) string {
-	if data == nil {
-		return message
-	}
-	result := message
-	for key, value := range data {
-		placeholder := "{{" + key + "}}"
-		if strVal, ok := value.(string); ok {
-			result = strings.ReplaceAll(result, placeholder, strVal)
-		}
-	}
-	return result
-}
-
-// sendStepWithSkipCheck checks if a step should be skipped and sends the appropriate step message
-// It takes the full flow to find next steps when skipping
-func (a *App) sendStepWithSkipCheck(account *models.WhatsAppAccount, session *models.ChatbotSession, contact *models.Contact, step *models.ChatbotFlowStep, flow *models.ChatbotFlow, skippedSteps map[string]bool) {
-	// Prevent infinite loops
-	if skippedSteps == nil {
-		skippedSteps = make(map[string]bool)
-	}
-	if skippedSteps[step.StepName] {
-		a.Log.Warn("Skip loop detected, completing flow", "step", step.StepName)
-		a.completeFlow(account, session, contact, flow)
-		return
-	}
-
-	// Check if step should be skipped
-	sessionData := session.SessionData
-	if sessionData == nil {
-		sessionData = models.JSONB{}
-	}
-
-	if a.shouldSkipStep(step, sessionData) {
-		a.Log.Info("Skipping step", "step", step.StepName, "condition", step.SkipCondition)
-		skippedSteps[step.StepName] = true
-
-		// Log step skipped
-		a.logFlowEvent(session.ID, flow.ID, step.StepName, models.FlowLogStepSkipped,
-			fmt.Sprintf("Step '%s' skipped (condition: %s)", step.StepName, step.SkipCondition),
-			map[string]interface{}{"skip_condition": step.SkipCondition})
-
-		// Find next step
-		nextStepName := step.NextStep
-		if nextStepName == "__end__" {
-			a.completeFlow(account, session, contact, flow)
-			return
-		}
-		if nextStepName == "" {
-			// Find by step order (don't fall through into branch targets)
-			for i, s := range flow.Steps {
-				if s.StepName == step.StepName && i+1 < len(flow.Steps) {
-					candidate := flow.Steps[i+1].StepName
-					if !isBranchTarget(candidate, flow) {
-						nextStepName = candidate
-					}
-					break
-				}
-			}
-		}
-
-		if nextStepName == "" {
-			// No next step, complete flow
-			a.completeFlow(account, session, contact, flow)
-			return
-		}
-
-		// Find and execute next step
-		var nextStep *models.ChatbotFlowStep
-		for i := range flow.Steps {
-			if flow.Steps[i].StepName == nextStepName {
-				nextStep = &flow.Steps[i]
-				break
-			}
-		}
-
-		if nextStep == nil {
-			a.Log.Warn("Next step not found after skip, completing flow", "next_step", nextStepName)
-			a.completeFlow(account, session, contact, flow)
-			return
-		}
-
-		// Update session to next step
-		session.CurrentStep = nextStep.StepName
-		a.DB.Model(session).Update("current_step", nextStep.StepName)
-
-		// Recursively check next step (it may also need to be skipped)
-		a.sendStepWithSkipCheck(account, session, contact, nextStep, flow, skippedSteps)
-		return
-	}
-
-	// Handle branch step - evaluate condition and route to correct path without sending a message
-	if step.MessageType == models.FlowStepTypeBranch {
-		a.processBranchStep(account, session, contact, step, flow, skippedSteps)
-		return
-	}
-
-	// Not skipping - send the step message normally
-	a.sendStepMessage(account, session, contact, step)
-
-	// If input type is "none", automatically advance to next step without waiting for user input
-	if step.InputType == models.InputTypeNone {
-
-		// Find next step
-		nextStepName := step.NextStep
-		if nextStepName == "__end__" {
-			a.completeFlow(account, session, contact, flow)
-			return
-		}
-		if nextStepName == "" {
-			// Find by step order (don't fall through into branch targets)
-			for i, s := range flow.Steps {
-				if s.StepName == step.StepName && i+1 < len(flow.Steps) {
-					candidate := flow.Steps[i+1].StepName
-					if !isBranchTarget(candidate, flow) {
-						nextStepName = candidate
-					}
-					break
-				}
-			}
-		}
-
-		if nextStepName == "" {
-			// No next step, complete flow
-			a.completeFlow(account, session, contact, flow)
-			return
-		}
-
-		// Find and execute next step
-		var nextStep *models.ChatbotFlowStep
-		for i := range flow.Steps {
-			if flow.Steps[i].StepName == nextStepName {
-				nextStep = &flow.Steps[i]
-				break
-			}
-		}
-
-		if nextStep == nil {
-			a.Log.Warn("Next step not found after no-input step, completing flow", "next_step", nextStepName)
-			a.completeFlow(account, session, contact, flow)
-			return
-		}
-
-		// Update session to next step
-		session.CurrentStep = nextStep.StepName
-		a.DB.Model(session).Update("current_step", nextStep.StepName)
-
-		// Recursively process next step (it may also need to skip or have no input)
-		a.sendStepWithSkipCheck(account, session, contact, nextStep, flow, skippedSteps)
-	}
-}
-
-// sendStepMessage sends the appropriate message based on step message_type
-func (a *App) sendStepMessage(account *models.WhatsAppAccount, session *models.ChatbotSession, contact *models.Contact, step *models.ChatbotFlowStep) {
-	var message string
-	msgCtx := a.buildMessageContext(account, session, contact)
-
-	a.Log.Debug("sendStepMessage called", "step", step.StepName, "message_type", step.MessageType, "input_config", step.InputConfig)
-
-	// Log step sent
-	if session.CurrentFlowID != nil {
-		a.logFlowEvent(session.ID, *session.CurrentFlowID, step.StepName, models.FlowLogStepSent,
-			fmt.Sprintf("Step '%s' sent (type: %s, input: %s)", step.StepName, step.MessageType, step.InputType),
-			map[string]interface{}{"message_type": string(step.MessageType), "input_type": string(step.InputType)})
-	}
-
-	switch step.MessageType {
-	case models.FlowStepTypeAPIFetch:
-		// Fetch response from external API (may include message + buttons)
-		// Pass the step message as template - it will be processed with API response data
-		// Load org for contact/organization context in API URL, headers, body
-		var org models.Organization
-		var orgPtr *models.Organization
-		if err := a.DB.Where("id = ?", account.OrganizationID).First(&org).Error; err == nil {
-			orgPtr = &org
-		} else {
-			a.Log.Warn("Could not load organization for API context", "org_id", account.OrganizationID, "error", err)
-		}
-		apiResp, err := a.fetchApiResponse(step.ApiConfig, session.SessionData, step.Message, account, contact, orgPtr)
-		if err != nil {
-			a.Log.Error("Failed to fetch API response", "error", err, "step", step.StepName)
-			if session.CurrentFlowID != nil {
-				a.logFlowEvent(session.ID, *session.CurrentFlowID, step.StepName, models.FlowLogError,
-					fmt.Sprintf("API call failed at step '%s': %s", step.StepName, err.Error()),
-					map[string]interface{}{"error": err.Error()})
-			}
-			// Use fallback message if configured, otherwise use the step message
-			apiData := msgCtx
-			if fallback, ok := step.ApiConfig["fallback_message"].(string); ok && fallback != "" {
-				message = processTemplate(fallback, apiData)
-			} else if step.Message != "" {
-				message = processTemplate(step.Message, apiData)
-			} else {
-				message = "Sorry, there was an error processing your request."
-			}
-			if err := a.sendAndSaveTextMessage(account, contact, message); err != nil {
-				a.Log.Error("Failed to send API error message", "error", err, "contact", contact.PhoneNumber)
-			}
-		} else {
-			message = apiResp.Message
-			if session.CurrentFlowID != nil {
-				a.logFlowEvent(session.ID, *session.CurrentFlowID, step.StepName, models.FlowLogAPICalled,
-					fmt.Sprintf("API called successfully at step '%s'", step.StepName),
-					map[string]interface{}{})
-			}
-
-			// Save mapped data to session for future steps
-			if apiResp.MappedData != nil {
-				maps.Copy(session.SessionData, apiResp.MappedData)
-				a.DB.Model(session).Update("session_data", session.SessionData)
-			}
-
-			// why do you need api to send message??
-			// Check if API returned buttons
-			// if len(apiResp.Buttons) > 0 {
-			// 	if err := a.sendAndSaveInteractiveButtons(account, contact, message, apiResp.Buttons); err != nil {
-			// 		a.Log.Error("Failed to send API response buttons", "error", err, "contact", contact.PhoneNumber)
-			// 	}
-			// } else {
-			// 	if err := a.sendAndSaveTextMessage(account, contact, message); err != nil {
-			// 		a.Log.Error("Failed to send API response message", "error", err, "contact", contact.PhoneNumber)
-			// 	}
-			// }
-		}
-		a.logSessionMessage(session.ID, models.DirectionOutgoing, message, step.StepName)
-
-	case models.FlowStepTypeButtons:
-		// Send interactive buttons message
-		message = processTemplate(step.Message, msgCtx)
-		if len(step.Buttons) > 0 {
-			buttons := make([]map[string]any, 0, len(step.Buttons))
-			for _, btn := range step.Buttons {
-				if btnMap, ok := btn.(map[string]any); ok {
-					buttons = append(buttons, btnMap)
-				}
-			}
-			buttons = processButtonsWithContext(buttons, msgCtx)
-			if err := a.sendAndSaveInteractiveButtons(account, contact, message, buttons); err != nil {
-				a.Log.Error("Failed to send buttons", "error", err, "contact", contact.PhoneNumber)
-			}
-		} else {
-			// No buttons configured, fall back to text
-			if err := a.sendAndSaveTextMessage(account, contact, message); err != nil {
-				a.Log.Error("Failed to send step message", "error", err, "contact", contact.PhoneNumber)
-			}
-		}
-		a.logSessionMessage(session.ID, models.DirectionOutgoing, message, step.StepName)
-
-	case models.FlowStepTypeTransfer:
-		// Transfer to team/agent queue
-		message = processTemplate(step.Message, msgCtx)
-		if message != "" {
-			if err := a.sendAndSaveTextMessage(account, contact, message); err != nil {
-				a.Log.Error("Failed to send transfer message", "error", err, "contact", contact.PhoneNumber)
-			}
-			a.logSessionMessage(session.ID, models.DirectionOutgoing, message, step.StepName)
-		}
-
-		// Get transfer configuration
-		var teamID *uuid.UUID
-		var notes string
-		if step.TransferConfig != nil {
-			if teamIDStr, ok := step.TransferConfig["team_id"].(string); ok && teamIDStr != "" && teamIDStr != "_general" {
-				if parsedID, err := uuid.Parse(teamIDStr); err == nil {
-					teamID = &parsedID
-				}
-			}
-			if n, ok := step.TransferConfig["notes"].(string); ok {
-				notes = processTemplate(n, msgCtx)
-			}
-		}
-
-		// Log transfer initiated
-		if session.CurrentFlowID != nil {
-			teamIDStr := ""
-			if teamID != nil {
-				teamIDStr = teamID.String()
-			}
-			a.logFlowEvent(session.ID, *session.CurrentFlowID, step.StepName, models.FlowLogTransferInitiated,
-				fmt.Sprintf("Transfer initiated at step '%s'", step.StepName),
-				map[string]interface{}{"team_id": teamIDStr, "notes": notes})
-		}
-
-		// Create the transfer
-		if teamID != nil {
-			a.createTransferToTeam(account, contact, *teamID, notes, models.TransferSourceFlow)
-		} else {
-			// General queue transfer
-			a.createTransferToQueue(account, contact, models.TransferSourceFlow)
-		}
-
-		// End the flow session (transfer takes over)
-		a.exitFlow(session)
-		return
-
-	case models.FlowStepTypeWhatsAppFlow:
-		// Send a WhatsApp Flow (interactive form)
-		a.Log.Debug("Processing WhatsApp Flow step", "step", step.StepName, "input_config", step.InputConfig)
-		message = processTemplate(step.Message, msgCtx)
-
-		// Extract flow configuration from input_config
-		var flowID, headerText, ctaText string
-		if step.InputConfig != nil {
-			if fid, ok := step.InputConfig["whatsapp_flow_id"].(string); ok {
-				flowID = fid
-				a.Log.Debug("Found WhatsApp Flow ID", "flow_id", flowID)
-			}
-			if header, ok := step.InputConfig["flow_header"].(string); ok {
-				headerText = processTemplate(header, msgCtx)
-			}
-			if cta, ok := step.InputConfig["flow_cta"].(string); ok {
-				ctaText = cta
-			}
-		}
-
-		if flowID == "" {
-			a.Log.Error("WhatsApp Flow step missing flow ID", "step", step.StepName)
-			// Fall back to text message
-			if err := a.sendAndSaveTextMessage(account, contact, message); err != nil {
-				a.Log.Error("Failed to send fallback message", "error", err, "contact", contact.PhoneNumber)
-			}
-		} else {
-			// Look up the WhatsApp Flow to get the first screen name
-			var waFlow models.WhatsAppFlow
-			firstScreen := ""
-			if err := a.DB.Where("meta_flow_id = ?", flowID).First(&waFlow).Error; err != nil {
-				a.Log.Debug("Could not find WhatsApp Flow in database, using default screen", "meta_flow_id", flowID)
-			} else {
-				// Extract first screen name from screens array
-				if len(waFlow.Screens) > 0 {
-					if screenMap, ok := waFlow.Screens[0].(map[string]any); ok {
-						if screenID, ok := screenMap["id"].(string); ok {
-							firstScreen = screenID
-							a.Log.Debug("Found first screen from flow", "first_screen", firstScreen)
-						}
-					}
-				}
-				// If screens array is empty, try to get from flow_json
-				if firstScreen == "" && waFlow.FlowJSON != nil {
-					if screens, ok := waFlow.FlowJSON["screens"].([]any); ok && len(screens) > 0 {
-						if screenMap, ok := screens[0].(map[string]any); ok {
-							if screenID, ok := screenMap["id"].(string); ok {
-								firstScreen = screenID
-								a.Log.Debug("Found first screen from flow_json", "first_screen", firstScreen)
-							}
-						}
-					}
-				}
-			}
-
-			// Generate a unique flow token for tracking
-			flowToken := fmt.Sprintf("chatbot_%s_%s_%d", session.ID.String(), step.StepName, time.Now().UnixNano())
-			a.Log.Debug("Sending WhatsApp Flow message", "flow_id", flowID, "first_screen", firstScreen, "cta", ctaText)
-
-			if err := a.sendAndSaveFlowMessage(account, contact, flowID, headerText, message, ctaText, flowToken, firstScreen); err != nil {
-				a.Log.Error("Failed to send WhatsApp Flow message", "error", err, "contact", contact.PhoneNumber, "flow_id", flowID)
-			}
-		}
-		a.logSessionMessage(session.ID, models.DirectionOutgoing, message, step.StepName)
-
-	default:
-		// Default: use the step message with template processing
-		a.Log.Debug("Unhandled message type, falling back to text", "message_type", step.MessageType, "step", step.StepName)
-		message = processTemplate(step.Message, msgCtx)
-		if err := a.sendAndSaveTextMessage(account, contact, message); err != nil {
-			a.Log.Error("Failed to send step message", "error", err, "contact", contact.PhoneNumber)
-		}
-		a.logSessionMessage(session.ID, models.DirectionOutgoing, message, step.StepName)
-	}
-}
-
-// ApiResponse represents a response from an external API that may include buttons
 // executeConfiguredAPI builds and executes an HTTP request from a chatbot API config.
 // replaceVar is called to substitute variables in the URL, body, and header values.
 // Returns the response body and status code.
@@ -1802,6 +897,7 @@ func (a *App) executeConfiguredAPI(apiConfig models.JSONB, replaceVar func(strin
 		return nil, 0, fmt.Errorf("API URL is required")
 	}
 	apiURL = replaceVar(apiURL)
+	logURL := redactURLForLog(apiURL)
 
 	method := "GET"
 	if m, ok := apiConfig["method"].(string); ok && m != "" {
@@ -1829,8 +925,11 @@ func (a *App) executeConfiguredAPI(apiConfig models.JSONB, replaceVar func(strin
 		}
 	}
 
+	a.Log.Info("Executing configured API request", "method", method, "url", logURL)
+
 	resp, err := a.HTTPClient.Do(req)
 	if err != nil {
+		a.Log.Error("Configured API request failed", "method", method, "url", logURL, "error", err)
 		return nil, 0, fmt.Errorf("API request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
@@ -1838,118 +937,34 @@ func (a *App) executeConfiguredAPI(apiConfig models.JSONB, replaceVar func(strin
 	limitReader := io.LimitReader(resp.Body, 1024*1024)
 	body, err := io.ReadAll(limitReader)
 	if err != nil {
+		a.Log.Error("Failed to read configured API response", "method", method, "url", logURL, "status_code", resp.StatusCode, "error", err)
 		return nil, 0, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		a.Log.Warn(
+			"Configured API request returned non-2xx",
+			"method", method,
+			"url", logURL,
+			"status_code", resp.StatusCode,
+			"response_preview", truncateLogValue(string(body), 300),
+		)
+	} else {
+		a.Log.Info(
+			"Configured API request completed",
+			"method", method,
+			"url", logURL,
+			"status_code", resp.StatusCode,
+			"response_bytes", len(body),
+		)
 	}
 
 	return body, resp.StatusCode, nil
 }
 
-type ApiResponse struct {
-	Message      string
-	Buttons      []map[string]any
-	MappedData   map[string]any // Data extracted via response_mapping
-	ResponseData map[string]any // Full API response data
-}
-
-// fetchApiResponse fetches a response from an external API, supporting message + buttons
-// and response_mapping for storing API data in session variables.
-// account, contact and org are merged into the template context so {{account.phone_number}},
-// {{contact.phone_number}}, {{organization.name}}, etc. work in URL, headers, and body.
-func (a *App) fetchApiResponse(apiConfig models.JSONB, sessionData models.JSONB, messageTemplate string, account *models.WhatsAppAccount, contact *models.Contact, org *models.Organization) (*ApiResponse, error) {
-	if apiConfig == nil {
-		return nil, fmt.Errorf("API config is empty")
-	}
-
-	// Merge account, contact and org into context for variable replacement
-	apiData := make(models.JSONB)
-	for k, v := range sessionData {
-		apiData[k] = v
-	}
-	for k, v := range buildChatbotAPIContext(account, contact, org) {
-		apiData[k] = v
-	}
-
-	replaceVar := func(s string) string { return processTemplate(s, apiData) }
-	respBody, statusCode, err := a.executeConfiguredAPI(apiConfig, replaceVar)
-	if err != nil {
-		return nil, err
-	}
-
-	if statusCode < 200 || statusCode >= 300 {
-		return nil, fmt.Errorf("API returned status %d: %s", statusCode, string(respBody))
-	}
-
-	// Parse JSON response
-	var jsonResp map[string]any
-	if err := json.Unmarshal(respBody, &jsonResp); err != nil {
-		// If not JSON, return raw response as message
-		return &ApiResponse{Message: string(respBody)}, nil
-	}
-
-	result := &ApiResponse{
-		ResponseData: jsonResp,
-	}
-
-	// Process response_mapping if configured
-	// This maps API response fields to session variables for use in templates
-	if responseMapping, ok := apiConfig["response_mapping"].(map[string]any); ok {
-		mappingStrings := make(map[string]string)
-		for varName, path := range responseMapping {
-			if pathStr, ok := path.(string); ok {
-				mappingStrings[varName] = pathStr
-			}
-		}
-		result.MappedData = extractResponseMapping(jsonResp, mappingStrings)
-
-		// Merge mapped data into sessionData for persistence and apiData for template processing
-		for k, v := range result.MappedData {
-			sessionData[k] = v
-			apiData[k] = v
-		}
-	}
-
-	// Process the message template with all available data (including mapped data, contact, org)
-	if messageTemplate != "" {
-		result.Message = processTemplate(messageTemplate, apiData)
-	} else if msg, ok := jsonResp["message"].(string); ok {
-		// Fallback: check for "message" field in response
-		result.Message = msg
-	} else {
-		// No message template, return raw response
-		result.Message = string(respBody)
-	}
-
-	// Extract buttons if present - format: [{"id": "test", "value": "Test"}, ...]
-	if buttons, ok := jsonResp["buttons"].([]any); ok && len(buttons) > 0 {
-		result.Buttons = make([]map[string]any, 0, len(buttons))
-		for _, btn := range buttons {
-			if btnMap, ok := btn.(map[string]any); ok {
-				// Normalize button format: ensure we have "id" and "title"
-				normalizedBtn := make(map[string]any)
-
-				// Handle "id" field
-				if id, ok := btnMap["id"].(string); ok {
-					normalizedBtn["id"] = id
-				}
-
-				// Handle "value" or "title" for display text
-				if value, ok := btnMap["value"].(string); ok {
-					normalizedBtn["title"] = value
-				} else if title, ok := btnMap["title"].(string); ok {
-					normalizedBtn["title"] = title
-				}
-
-				if normalizedBtn["id"] != nil && normalizedBtn["title"] != nil {
-					result.Buttons = append(result.Buttons, normalizedBtn)
-				}
-			}
-		}
-	}
-
-	return result, nil
-}
-
 // generateAIResponse generates a response using the configured AI provider
+// Mirrors fetchAPIContext in seeding implicit variables (phone_number) so flow-step
+// API templates can interpolate {{phone_number}} just like AI-context API templates.
 func (a *App) generateAIResponse(settings *models.ChatbotSettings, session *models.ChatbotSession, userMessage string, account *models.WhatsAppAccount, contact *models.Contact) (string, error) {
 	// Load org for contact/organization context in API calls
 	var org models.Organization
@@ -1957,6 +972,7 @@ func (a *App) generateAIResponse(settings *models.ChatbotSettings, session *mode
 	if err := a.DB.Where("id = ?", settings.OrganizationID).First(&org).Error; err == nil {
 		orgPtr = &org
 	}
+
 	// Build context from AIContext entries
 	contextData := a.buildAIContext(settings.OrganizationID, session, userMessage, account, contact, orgPtr)
 
@@ -2517,6 +1533,160 @@ func getStringFromMap(m map[string]any, key string) string {
 	return ""
 }
 
+// ExtractedMessage holds the derived content fields of a message.
+type ExtractedMessage struct {
+	Text             string
+	Type             string // may differ from msg.Type, e.g. "button_reply"
+	Media            *MediaInfo
+	ButtonID         string         // used by chatbot routing only
+	FlowResponseData map[string]any // used by chatbot routing only
+}
+
+// extractMessageContent walks an IncomingTextMessage and returns the derived
+// fields. Used by both the inbound and echo paths.
+func (a *App) extractMessageContent(ctx context.Context, msg IncomingTextMessage, account *models.WhatsAppAccount) ExtractedMessage {
+	extracted := ExtractedMessage{
+		Type: msg.Type,
+	}
+
+	if msg.Type == "text" && msg.Text != nil {
+		extracted.Text = msg.Text.Body
+	} else if msg.Type == "button" && msg.Button != nil {
+		// Template quick_reply button click — WhatsApp sends type "button"
+		extracted.Text = msg.Button.Text
+		extracted.ButtonID = msg.Button.Payload
+		extracted.Type = "button_reply"
+	} else if msg.Type == "interactive" && msg.Interactive != nil {
+		// Handle button reply
+		if msg.Interactive.ButtonReply != nil {
+			extracted.Text = msg.Interactive.ButtonReply.Title
+			extracted.ButtonID = msg.Interactive.ButtonReply.ID
+			extracted.Type = "button_reply"
+		}
+		// Handle list reply
+		if msg.Interactive.ListReply != nil {
+			extracted.Text = msg.Interactive.ListReply.Title
+			extracted.ButtonID = msg.Interactive.ListReply.ID
+			extracted.Type = "button_reply"
+		}
+		// Handle WhatsApp Flow reply (nfm_reply)
+		if msg.Interactive.NFMReply != nil {
+			extracted.Text = msg.Interactive.NFMReply.Body
+			extracted.Type = "nfm_reply"
+			// Parse the response JSON to extract form data
+			if msg.Interactive.NFMReply.ResponseJSON != "" {
+				var responseData map[string]any
+				if err := json.Unmarshal([]byte(msg.Interactive.NFMReply.ResponseJSON), &responseData); err != nil {
+					a.Log.Error("Failed to parse flow response JSON", "error", err, "response_json", msg.Interactive.NFMReply.ResponseJSON)
+				} else {
+					extracted.FlowResponseData = responseData
+					a.Log.Info("Parsed WhatsApp Flow response", "data", extracted.FlowResponseData)
+				}
+			}
+		}
+	} else if msg.Type == "image" && msg.Image != nil {
+		// Handle image message
+		extracted.Text = msg.Image.Caption
+		extracted.Media = &MediaInfo{
+			MediaMimeType: msg.Image.MimeType,
+		}
+		// Download and save media locally
+		waAccount := a.toWhatsAppAccount(account)
+		if localPath, err := a.DownloadAndSaveMedia(ctx, msg.Image.ID, msg.Image.MimeType, waAccount); err != nil {
+			a.Log.Error("Failed to download image", "error", err, "media_id", msg.Image.ID)
+		} else {
+			extracted.Media.MediaURL = localPath
+		}
+	} else if msg.Type == "document" && msg.Document != nil {
+		// Handle document message
+		extracted.Text = msg.Document.Caption
+		extracted.Media = &MediaInfo{
+			MediaMimeType: msg.Document.MimeType,
+			MediaFilename: msg.Document.Filename,
+		}
+		// Download and save media locally
+		waAccount := a.toWhatsAppAccount(account)
+		if localPath, err := a.DownloadAndSaveMedia(ctx, msg.Document.ID, msg.Document.MimeType, waAccount); err != nil {
+			a.Log.Error("Failed to download document", "error", err, "media_id", msg.Document.ID)
+		} else {
+			extracted.Media.MediaURL = localPath
+		}
+	} else if msg.Type == "video" && msg.Video != nil {
+		// Handle video message
+		extracted.Text = msg.Video.Caption
+		extracted.Media = &MediaInfo{
+			MediaMimeType: msg.Video.MimeType,
+		}
+		// Download and save media locally
+		waAccount := a.toWhatsAppAccount(account)
+		if localPath, err := a.DownloadAndSaveMedia(ctx, msg.Video.ID, msg.Video.MimeType, waAccount); err != nil {
+			a.Log.Error("Failed to download video", "error", err, "media_id", msg.Video.ID)
+		} else {
+			extracted.Media.MediaURL = localPath
+		}
+	} else if msg.Type == "audio" && msg.Audio != nil {
+		// Handle audio message
+		extracted.Media = &MediaInfo{
+			MediaMimeType: msg.Audio.MimeType,
+		}
+		// Download and save media locally
+		waAccount := a.toWhatsAppAccount(account)
+		if localPath, err := a.DownloadAndSaveMedia(ctx, msg.Audio.ID, msg.Audio.MimeType, waAccount); err != nil {
+			a.Log.Error("Failed to download audio", "error", err, "media_id", msg.Audio.ID)
+		} else {
+			extracted.Media.MediaURL = localPath
+		}
+	} else if msg.Type == "sticker" && msg.Sticker != nil {
+		// Handle sticker message (treat like image)
+		extracted.Media = &MediaInfo{
+			MediaMimeType: msg.Sticker.MimeType,
+		}
+		// Download and save media locally
+		waAccount := a.toWhatsAppAccount(account)
+		if localPath, err := a.DownloadAndSaveMedia(ctx, msg.Sticker.ID, msg.Sticker.MimeType, waAccount); err != nil {
+			a.Log.Error("Failed to download sticker", "error", err, "media_id", msg.Sticker.ID)
+		} else {
+			extracted.Media.MediaURL = localPath
+		}
+	} else if msg.Type == "location" && msg.Location != nil {
+		// Handle location message - store as JSON in content
+		locationData := map[string]any{
+			"latitude":  msg.Location.Latitude,
+			"longitude": msg.Location.Longitude,
+		}
+		if msg.Location.Name != "" {
+			locationData["name"] = msg.Location.Name
+		}
+		if msg.Location.Address != "" {
+			locationData["address"] = msg.Location.Address
+		}
+		if jsonBytes, err := json.Marshal(locationData); err == nil {
+			extracted.Text = string(jsonBytes)
+		}
+	} else if msg.Type == "contacts" && len(msg.Contacts) > 0 {
+		// Handle contacts message - store as JSON in content
+		contactsData := make([]map[string]any, 0, len(msg.Contacts))
+		for _, c := range msg.Contacts {
+			contactVal := map[string]any{
+				"name": c.Name.FormattedName,
+			}
+			if len(c.Phones) > 0 {
+				phones := make([]string, 0, len(c.Phones))
+				for _, p := range c.Phones {
+					phones = append(phones, p.Phone)
+				}
+				contactVal["phones"] = phones
+			}
+			contactsData = append(contactsData, contactVal)
+		}
+		if jsonBytes, err := json.Marshal(contactsData); err == nil {
+			extracted.Text = string(jsonBytes)
+		}
+	}
+
+	return extracted
+}
+
 // MediaInfo holds media-related information for an incoming message
 type MediaInfo struct {
 	MediaURL      string
@@ -2563,12 +1733,22 @@ func (a *App) saveIncomingMessage(account *models.WhatsAppAccount, contact *mode
 		return
 	}
 
+	// If the chatbot will handle this conversation (enabled + no active
+	// agent transfer), pre-mark the message as read so the contact-list
+	// unread badge doesn't briefly flash before the bot's reply arrives.
+	// See issue #280.
+	if a.willChatbotHandle(account, contact) {
+		a.DB.Model(&models.Message{}).Where("id = ?", message.ID).
+			Update("status", models.MessageStatusRead)
+		message.Status = models.MessageStatusRead
+	}
+
 	// Update contact's last message info
 	preview := content
 	if len(preview) > 100 {
 		preview = preview[:97] + "..."
 	}
-	if msgType != "text" && msgType != "button_reply" {
+	if msgType != "text" && msgType != "button_reply" && msgType != "nfm_reply" {
 		preview = "[" + msgType + "]"
 	}
 
@@ -2654,317 +1834,4 @@ func (a *App) isWithinBusinessHours(businessHours models.JSONBArray) bool {
 
 	// If no matching day found, assume outside business hours
 	return false
-}
-
-// processBranchStep evaluates a condition from input_config and routes to the true/false path via conditional_next
-// input_config: {"variable": "userExists", "operator": "equals", "value": "true"}
-// conditional_next: {"true": "step_a", "false": "step_b"}
-func (a *App) processBranchStep(account *models.WhatsAppAccount, session *models.ChatbotSession, contact *models.Contact, step *models.ChatbotFlowStep, flow *models.ChatbotFlow, skippedSteps map[string]bool) {
-	sessionData := session.SessionData
-	if sessionData == nil {
-		sessionData = models.JSONB{}
-	}
-
-	// Extract condition from input_config
-	variable, _ := step.InputConfig["variable"].(string)
-	operator, _ := step.InputConfig["operator"].(string)
-	value, _ := step.InputConfig["value"].(string)
-
-	if variable == "" {
-		a.Log.Warn("Branch step missing variable in input_config", "step", step.StepName)
-		a.completeFlow(account, session, contact, flow)
-		return
-	}
-
-	// Get the variable value from session data
-	varValue := sessionData[variable]
-
-	// Evaluate the condition
-	result := evaluateBranchCondition(varValue, operator, value)
-	a.Log.Info("Branch step evaluated", "step", step.StepName, "variable", variable, "operator", operator, "value", value, "varValue", varValue, "result", result)
-
-	// Log branch evaluated
-	a.logFlowEvent(session.ID, flow.ID, step.StepName, models.FlowLogBranchEvaluated,
-		fmt.Sprintf("Branch '%s': %v %s %s = %v", step.StepName, varValue, operator, value, result),
-		map[string]interface{}{"variable": variable, "operator": operator, "value": value, "var_value": varValue, "result": result})
-
-	// Determine next step based on result
-	branchKey := "false"
-	if result {
-		branchKey = "true"
-	}
-
-	var nextStepName string
-	if step.ConditionalNext != nil {
-		if next, ok := step.ConditionalNext[branchKey].(string); ok {
-			nextStepName = next
-		}
-	}
-
-	// Fallback to default or next sequential step
-	if nextStepName == "" {
-		if step.ConditionalNext != nil {
-			if defaultNext, ok := step.ConditionalNext["default"].(string); ok {
-				nextStepName = defaultNext
-			}
-		}
-	}
-	if nextStepName == "" {
-		nextStepName = step.NextStep
-	}
-	if nextStepName == "" {
-		// Find next sequential step
-		for i, s := range flow.Steps {
-			if s.StepName == step.StepName && i+1 < len(flow.Steps) {
-				nextStepName = flow.Steps[i+1].StepName
-				break
-			}
-		}
-	}
-
-	if nextStepName == "" || nextStepName == "__end__" {
-		a.completeFlow(account, session, contact, flow)
-		return
-	}
-
-	// Find and execute next step
-	var nextStep *models.ChatbotFlowStep
-	for i := range flow.Steps {
-		if flow.Steps[i].StepName == nextStepName {
-			nextStep = &flow.Steps[i]
-			break
-		}
-	}
-
-	if nextStep == nil {
-		a.Log.Warn("Branch target step not found, completing flow", "next_step", nextStepName)
-		a.completeFlow(account, session, contact, flow)
-		return
-	}
-
-	// Update session to next step
-	session.CurrentStep = nextStep.StepName
-	a.DB.Model(session).Updates(map[string]interface{}{
-		"current_step": nextStep.StepName,
-		"step_retries": 0,
-	})
-
-	// Recursively process next step
-	a.sendStepWithSkipCheck(account, session, contact, nextStep, flow, skippedSteps)
-}
-
-// isBranchTarget checks if a step name is a direct target of any branch step in the flow
-// This is used to prevent sequential fallthrough into branch-only steps
-func isBranchTarget(stepName string, flow *models.ChatbotFlow) bool {
-	for _, s := range flow.Steps {
-		if s.MessageType == models.FlowStepTypeBranch && s.ConditionalNext != nil {
-			if target, ok := s.ConditionalNext["true"].(string); ok && target == stepName {
-				return true
-			}
-			if target, ok := s.ConditionalNext["false"].(string); ok && target == stepName {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-// evaluateBranchCondition evaluates a single branch condition
-func evaluateBranchCondition(varValue interface{}, operator string, compareValue string) bool {
-	// Convert varValue to string for comparison
-	varStr := fmt.Sprintf("%v", varValue)
-
-	switch operator {
-	case "equals", "eq", "==":
-		return strings.EqualFold(varStr, compareValue)
-	case "not_equals", "neq", "!=":
-		return !strings.EqualFold(varStr, compareValue)
-	case "exists":
-		return varValue != nil
-	case "not_exists":
-		return varValue == nil
-	case "not_empty":
-		return varValue != nil && varStr != "" && varStr != "<nil>"
-	case "empty":
-		return varValue == nil || varStr == "" || varStr == "<nil>"
-	case "contains":
-		return strings.Contains(strings.ToLower(varStr), strings.ToLower(compareValue))
-	case "gt", ">":
-		return varStr > compareValue
-	case "lt", "<":
-		return varStr < compareValue
-	default:
-		// Default: check if variable is truthy
-		return varValue != nil && varStr != "" && varStr != "false" && varStr != "0" && varStr != "<nil>"
-	}
-}
-
-// shouldSkipStep evaluates a text expression like "(status == 'vip' OR amount > 100) AND name != ''"
-func (a *App) shouldSkipStep(step *models.ChatbotFlowStep, sessionData map[string]interface{}) bool {
-	if step.SkipCondition == "" {
-		a.Log.Debug("No skip condition for step", "step", step.StepName)
-		return false
-	}
-	a.Log.Info("Evaluating skip condition", "step", step.StepName, "condition", step.SkipCondition, "sessionData", sessionData)
-	result := evaluateExpression(step.SkipCondition, sessionData)
-	a.Log.Info("Skip condition result", "step", step.StepName, "result", result)
-	return result
-}
-
-// evaluateExpression handles parentheses, AND, OR, and single conditions
-func evaluateExpression(expr string, data map[string]any) bool {
-	expr = strings.TrimSpace(expr)
-	if expr == "" {
-		return false
-	}
-
-	// Handle parentheses first - find innermost pairs and evaluate recursively
-	for strings.Contains(expr, "(") {
-		start := strings.LastIndex(expr, "(")
-		end := strings.Index(expr[start:], ")")
-		if end == -1 {
-			break // Malformed expression
-		}
-		end = start + end
-		inner := expr[start+1 : end]
-		result := evaluateExpression(inner, data)
-		// Replace (inner) with result
-		replacement := "false"
-		if result {
-			replacement = "true"
-		}
-		expr = expr[:start] + replacement + expr[end+1:]
-		expr = strings.TrimSpace(expr)
-	}
-
-	// Handle boolean literals (from parentheses evaluation)
-	if expr == "true" {
-		return true
-	}
-	if expr == "false" {
-		return false
-	}
-
-	// Split by OR (lower precedence) - case insensitive
-	orParts := splitByLogicOperator(expr, " OR ")
-	if len(orParts) > 1 {
-		for _, part := range orParts {
-			if evaluateExpression(part, data) {
-				return true
-			}
-		}
-		return false
-	}
-
-	// Split by AND (higher precedence) - case insensitive
-	andParts := splitByLogicOperator(expr, " AND ")
-	if len(andParts) > 1 {
-		for _, part := range andParts {
-			if !evaluateExpression(part, data) {
-				return false
-			}
-		}
-		return true
-	}
-
-	// Single condition
-	return evaluateSingleCondition(expr, data)
-}
-
-// splitByLogicOperator splits by AND/OR while preserving case-insensitivity
-func splitByLogicOperator(expr, op string) []string {
-	upperExpr := strings.ToUpper(expr)
-	upperOp := strings.ToUpper(op)
-
-	var parts []string
-	lastIdx := 0
-	for {
-		idx := strings.Index(upperExpr[lastIdx:], upperOp)
-		if idx == -1 {
-			parts = append(parts, strings.TrimSpace(expr[lastIdx:]))
-			break
-		}
-		parts = append(parts, strings.TrimSpace(expr[lastIdx:lastIdx+idx]))
-		lastIdx = lastIdx + idx + len(op)
-	}
-	return parts
-}
-
-// evaluateSingleCondition handles: phone != " or age > 18 or status == 'confirmed'
-func evaluateSingleCondition(expr string, data map[string]interface{}) bool {
-	expr = strings.TrimSpace(expr)
-
-	// Handle boolean literals
-	if expr == "true" {
-		return true
-	}
-	if expr == "false" {
-		return false
-	}
-
-	operators := []string{"!=", "==", ">=", "<=", ">", "<"}
-
-	for _, op := range operators {
-		if strings.Contains(expr, op) {
-			parts := strings.SplitN(expr, op, 2)
-			if len(parts) == 2 {
-				varName := strings.TrimSpace(parts[0])
-				expectedValue := strings.TrimSpace(parts[1])
-				expectedValue = strings.Trim(expectedValue, "'\"")
-
-				actualValue := ""
-				if val, exists := data[varName]; exists && val != nil {
-					actualValue = fmt.Sprintf("%v", val)
-				}
-
-				return compareValues(actualValue, op, expectedValue)
-			}
-		}
-	}
-	return false
-}
-
-// compareValues compares two values using the specified operator
-func compareValues(actual, operator, expected string) bool {
-	switch operator {
-	case "==":
-		return actual == expected
-	case "!=":
-		return actual != expected
-	case ">", "<", ">=", "<=":
-		// Try numeric comparison first
-		actualNum, err1 := parseNumber(actual)
-		expectedNum, err2 := parseNumber(expected)
-		if err1 == nil && err2 == nil {
-			switch operator {
-			case ">":
-				return actualNum > expectedNum
-			case "<":
-				return actualNum < expectedNum
-			case ">=":
-				return actualNum >= expectedNum
-			case "<=":
-				return actualNum <= expectedNum
-			}
-		}
-		// Fall back to string comparison
-		switch operator {
-		case ">":
-			return actual > expected
-		case "<":
-			return actual < expected
-		case ">=":
-			return actual >= expected
-		case "<=":
-			return actual <= expected
-		}
-	}
-	return false
-}
-
-// parseNumber attempts to parse a string as a float64
-func parseNumber(s string) (float64, error) {
-	var n float64
-	_, err := fmt.Sscanf(s, "%f", &n)
-	return n, err
 }

@@ -26,7 +26,18 @@ export const TEST_USERS = {
 }
 
 export async function login(page: Page, user: TestUser) {
-  await page.goto('/login')
+  // Clear any existing session to ensure the router doesn't intercept the /login
+  // navigation and redirect us away if the browser already has an active session.
+  await page.context().clearCookies()
+  try {
+    await page.evaluate(() => window.localStorage.clear())
+  } catch {
+    // Ignore if on about:blank
+  }
+
+  // Use domcontentloaded: vite dev server keeps the browser 'load' event pending
+  // due to HMR websocket + async chunk loading, which makes the default wait hang.
+  await page.goto('/login', { waitUntil: 'domcontentloaded' })
   await page.locator('input[name="email"], input[type="email"]').fill(user.email)
   await page.locator('input[name="password"], input[type="password"]').fill(user.password)
   await page.locator('button[type="submit"]').click()

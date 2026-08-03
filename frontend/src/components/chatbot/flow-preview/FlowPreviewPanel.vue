@@ -1,19 +1,21 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
 import type { FlowStep, FlowData } from '@/types/flow-preview'
+import type { ChatFlowGraph } from '@/services/api'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import InteractivePreview from './InteractivePreview.vue'
 import {
   MessageSquare,
-  MousePointerClick,
-  Globe,
-  MessageCircle,
   Users,
-  GitMerge,
+  Globe,
   Edit3,
   ExternalLink,
-  Play
+  Play,
+  GitBranch,
+  Clock,
+  StopCircle,
+  Variable,
 } from 'lucide-vue-next'
 
 const props = defineProps<{
@@ -24,34 +26,57 @@ const props = defineProps<{
   listPickerOpen: boolean
   teams: Array<{ id: string; name: string }>
   initialMode?: 'edit' | 'preview'
+  // v2 graph used by the interactive simulator. Edit-mode static preview
+  // continues to read selectedStep for the per-step WhatsApp render.
+  graph?: ChatFlowGraph | null
 }>()
 
 const emit = defineEmits<{
   'update:listPickerOpen': [value: boolean]
-  selectMessageType: [type: string]
 }>()
 
 const mode = ref<'edit' | 'preview'>(props.initialMode || 'edit')
 
-// Watch for initialMode changes
 watch(() => props.initialMode, (newMode) => {
   if (newMode) {
     mode.value = newMode
   }
 })
 
-const messageTypeIcons: Record<string, any> = {
-  text: MessageSquare,
-  buttons: MousePointerClick,
-  api_fetch: Globe,
-  whatsapp_flow: MessageCircle,
-  transfer: Users,
-  branch: GitMerge
+// Step types that don't render as a WhatsApp message bubble — control-
+// flow nodes that operate on session state without sending anything.
+const controlNodeMeta: Record<string, { label: string; icon: any; description: string }> = {
+  condition: {
+    label: 'Condition',
+    icon: GitBranch,
+    description: 'Branches the flow based on a boolean expression. No WhatsApp message is sent.',
+  },
+  timing: {
+    label: 'Timing',
+    icon: Clock,
+    description: 'Routes between in-hours and out-of-hours based on the schedule. No WhatsApp message is sent.',
+  },
+  goto_flow: {
+    label: 'Go to Flow',
+    icon: ExternalLink,
+    description: 'Jumps execution to another flow. Session variables carry forward.',
+  },
+  set_variable: {
+    label: 'Set Variable',
+    icon: Variable,
+    description: 'Assigns values to session variables. No WhatsApp message is sent.',
+  },
+  end: {
+    label: 'End',
+    icon: StopCircle,
+    description: 'Terminates the flow. The optional message below renders in WhatsApp on completion.',
+  },
 }
 
-function handleSelectMessageType(type: string) {
-  emit('selectMessageType', type)
-}
+const controlNodeInfo = computed(() => {
+  if (!props.selectedStep) return null
+  return controlNodeMeta[props.selectedStep.message_type] || null
+})
 
 // Sync listPickerOpen with parent
 const localListPickerOpen = computed({
@@ -94,35 +119,42 @@ const localListPickerOpen = computed({
       </div>
 
       <div class="text-xs text-gray-500 dark:text-gray-400">
-        {{ mode === 'edit' ? 'Static preview of selected step' : 'Interactive flow simulation' }}
+        {{ mode === 'edit' ? 'Read-only preview of selected step' : 'Interactive flow simulation' }}
       </div>
     </div>
 
     <!-- Content Area -->
     <div class="flex-1 overflow-hidden">
-      <!-- Edit Mode: Step Type Palette + Static Preview -->
+      <!-- Edit Mode: Read-only Static Preview -->
       <template v-if="mode === 'edit'">
         <div class="h-full flex flex-col">
-          <!-- Step Type Palette -->
-          <div class="p-4 border-b bg-white dark:bg-[#111b21]">
-            <p class="text-xs text-muted-foreground mb-2">Message Type</p>
-            <div class="flex flex-wrap gap-2">
-              <Button
-                v-for="(icon, type) in messageTypeIcons"
-                :key="type"
-                :variant="selectedStep?.message_type === type ? 'active' : 'outline'"
-                size="sm"
-                class="h-8 text-xs"
-                @click="handleSelectMessageType(type)"
-              >
-                <component :is="icon" class="h-3.5 w-3.5 mr-1.5" />
-                {{ type === 'api_fetch' ? 'API' : type === 'whatsapp_flow' ? 'Flow' : type === 'branch' ? 'Branch' : type.charAt(0).toUpperCase() + type.slice(1) }}
-              </Button>
+          <!-- Control-flow nodes don't render as WhatsApp bubbles — show
+               a typed placeholder card instead so authors aren't confused. -->
+          <div
+            v-if="selectedStep && controlNodeInfo"
+            class="flex-1 flex items-center justify-center p-6 bg-[#efeae2] dark:bg-[#0b141a]"
+          >
+            <div class="max-w-sm w-full bg-white dark:bg-[#202c33] rounded-xl shadow-md p-6 text-center">
+              <div class="inline-flex items-center justify-center w-12 h-12 rounded-full bg-gray-100 dark:bg-gray-800 mb-3">
+                <component :is="controlNodeInfo.icon" class="h-6 w-6 text-gray-600 dark:text-gray-300" />
+              </div>
+              <p class="text-sm font-medium text-gray-900 dark:text-gray-100 mb-1">
+                {{ controlNodeInfo.label }}
+              </p>
+              <p class="text-xs text-gray-500 dark:text-gray-400 mb-4">
+                {{ controlNodeInfo.description }}
+              </p>
+              <p v-if="selectedStep.message" class="text-xs text-gray-600 dark:text-gray-300 bg-gray-50 dark:bg-gray-900/30 rounded px-3 py-2 text-left">
+                {{ selectedStep.message }}
+              </p>
+              <p v-else class="text-xs text-gray-400 italic">
+                Use the right panel to configure this step.
+              </p>
             </div>
           </div>
 
-          <!-- Static WhatsApp Preview -->
-          <div class="flex-1 flex items-center justify-center p-4 bg-[#efeae2] dark:bg-[#0b141a] overflow-auto">
+          <!-- WhatsApp Static Preview (for message / buttons / api_fetch / whatsapp_flow / transfer) -->
+          <div v-else class="flex-1 flex items-center justify-center p-4 bg-[#efeae2] dark:bg-[#0b141a] overflow-auto">
             <div v-if="selectedStep" class="w-full max-w-sm">
               <!-- Phone Frame -->
               <div class="bg-[#efeae2] dark:bg-[#0b141a] rounded-2xl overflow-hidden shadow-xl flex flex-col h-[600px] relative">
@@ -140,8 +172,8 @@ const localListPickerOpen = computed({
                 <!-- Chat Messages -->
                 <ScrollArea class="flex-1 p-4">
                   <div class="space-y-3">
-                  <!-- Bot Message Bubble (not shown for branch steps) -->
-                  <div v-if="selectedStep.message_type !== 'branch'" class="flex justify-start">
+                  <!-- Bot Message Bubble -->
+                  <div class="flex justify-start">
                     <div class="max-w-[85%]">
                       <div class="bg-white dark:bg-[#202c33] rounded-lg rounded-tl-none shadow-sm p-3">
                         <p v-if="selectedStep.message" class="text-sm text-gray-800 dark:text-gray-200 whitespace-pre-wrap">{{ selectedStep.message }}</p>
@@ -184,7 +216,7 @@ const localListPickerOpen = computed({
                   </div>
 
                   <!-- User Response Placeholder -->
-                  <div v-if="selectedStep.message_type !== 'transfer' && selectedStep.message_type !== 'branch'" class="flex justify-end">
+                  <div v-if="selectedStep.message_type !== 'transfer'" class="flex justify-end">
                     <div class="max-w-[85%]">
                       <div class="bg-[#005c4b] light:bg-[#d9fdd3] rounded-lg rounded-tr-none shadow-sm p-3">
                         <p class="text-sm text-gray-200 light:text-gray-800 italic">
@@ -231,28 +263,6 @@ const localListPickerOpen = computed({
                     <div class="bg-blue-100 dark:bg-blue-900/30 text-xs text-blue-700 dark:text-blue-400 px-3 py-1.5 rounded-lg flex items-center gap-1.5">
                       <Globe class="h-3 w-3" />
                       <span>Message populated from API</span>
-                    </div>
-                  </div>
-
-                  <!-- Branch Info -->
-                  <div v-if="selectedStep.message_type === 'branch'" class="flex justify-center">
-                    <div class="bg-cyan-100 dark:bg-cyan-900/30 text-xs text-cyan-700 dark:text-cyan-400 px-4 py-3 rounded-lg space-y-2">
-                      <div class="flex items-center gap-1.5 font-medium">
-                        <GitMerge class="h-3.5 w-3.5" />
-                        <span>Branch Decision</span>
-                      </div>
-                      <div v-if="selectedStep.input_config?.variable" class="text-[11px]">
-                        If <code class="font-mono bg-cyan-200/50 dark:bg-cyan-800/50 px-1 rounded">{{ selectedStep.input_config.variable }}</code>
-                        {{ selectedStep.input_config.operator || 'is truthy' }}
-                        <template v-if="selectedStep.input_config.value && !['exists', 'not_exists', 'empty', 'not_empty'].includes(selectedStep.input_config.operator)">
-                          <code class="font-mono bg-cyan-200/50 dark:bg-cyan-800/50 px-1 rounded">{{ selectedStep.input_config.value }}</code>
-                        </template>
-                      </div>
-                      <div class="flex gap-3 text-[11px]">
-                        <span class="text-green-600">True → {{ selectedStep.conditional_next?.['true'] || 'next step' }}</span>
-                        <span class="text-red-600">False → {{ selectedStep.conditional_next?.['false'] || 'next step' }}</span>
-                      </div>
-                      <p class="text-[10px] opacity-70">No message is sent — this step only routes the flow.</p>
                     </div>
                   </div>
                   </div>
@@ -339,10 +349,10 @@ const localListPickerOpen = computed({
         </div>
       </template>
 
-      <!-- Preview Mode: Interactive Simulation -->
+      <!-- Preview Mode: Interactive Simulation (graph-based) -->
       <template v-else>
         <InteractivePreview
-          :steps="steps"
+          :graph="graph || null"
           :flow-data="flowData"
         />
       </template>
