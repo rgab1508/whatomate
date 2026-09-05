@@ -64,6 +64,110 @@ func TestStepsToGraph_TextStepWithStoreAsBecomesPrompt(t *testing.T) {
 	assert.Equal(t, "name", cfg["store_as"])
 }
 
+// This fork's v1 "branch" step has no expression — it stores a structured
+// {variable, operator, value} comparison — and must land on a condition
+// node with an equivalent expr-lang expression plus true/false edges.
+func TestStepsToGraph_BranchStepBecomesConditionNode(t *testing.T) {
+	steps := []models.ChatbotFlowStep{
+		{
+			StepName: "check", StepOrder: 1, MessageType: "branch",
+			InputConfig:     models.JSONB{"variable": "userExists", "operator": "equals", "value": "true"},
+			ConditionalNext: models.JSONB{"true": "known", "false": "onboard"},
+		},
+		{StepName: "known", StepOrder: 2, MessageType: "text", Message: "wb"},
+		{StepName: "onboard", StepOrder: 3, MessageType: "text", Message: "hi"},
+	}
+	g := stepsToGraph(steps, nil)
+	nodes := graphNodes(t, g)
+	require.Equal(t, "condition", nodes[1]["type"])
+	cfg, _ := nodes[1]["config"].(map[string]any)
+	expression, _ := cfg["expression"].(string)
+	require.NotEmpty(t, expression)
+
+	// The expression must behave like the deleted evaluateBranchCondition.
+	got, err := evaluateConditionExpression(expression, models.JSONB{"userExists": true})
+	require.NoError(t, err)
+	assert.True(t, got)
+	got, err = evaluateConditionExpression(expression, models.JSONB{"userExists": "TRUE"})
+	require.NoError(t, err)
+	assert.True(t, got, "comparison is case-insensitive")
+	got, err = evaluateConditionExpression(expression, models.JSONB{"userExists": false})
+	require.NoError(t, err)
+	assert.False(t, got)
+	got, err = evaluateConditionExpression(expression, models.JSONB{})
+	require.NoError(t, err)
+	assert.False(t, got, "missing variable must not error")
+
+	hasTrue, hasFalse := false, false
+	for _, e := range graphEdges(t, g) {
+		if e["from"] == "check" && e["condition"] == "true" && e["to"] == "known" {
+			hasTrue = true
+		}
+		if e["from"] == "check" && e["condition"] == "false" && e["to"] == "onboard" {
+			hasFalse = true
+		}
+	}
+	assert.True(t, hasTrue && hasFalse)
+}
+
+// A branch with no operator falls back to a truthiness test, matching v1.
+func TestStepsToGraph_BranchWithoutOperatorIsTruthiness(t *testing.T) {
+	expression := legacyBranchExpression(models.JSONB{"variable": "flag", "value": "true"})
+	require.NotEmpty(t, expression)
+	for _, tc := range []struct {
+		val  any
+		want bool
+	}{
+		{true, true}, {"yes", true}, {1.0, true},
+		{false, false}, {"", false}, {0.0, false}, {nil, false},
+	} {
+		got, err := evaluateConditionExpression(expression, models.JSONB{"flag": tc.val})
+		require.NoError(t, err, "value %v", tc.val)
+		assert.Equal(t, tc.want, got, "value %v", tc.val)
+	}
+}
+
+// "__end__" is a v1 sentinel, not a step row: edges pointing at it must
+// survive and gain a real end node carrying the completion message.
+func TestStepsToGraph_EndSentinelBecomesEndNode(t *testing.T) {
+	steps := []models.ChatbotFlowStep{
+		{StepName: "bye", StepOrder: 1, MessageType: "text", Message: "Bye", NextStep: "__end__"},
+	}
+	g := stepsToGraph(steps, nil)
+	var endNode map[string]any
+	for _, n := range graphNodes(t, g) {
+		if n["id"] == "__end__" {
+			endNode = n
+		}
+	}
+	require.NotNil(t, endNode, "expected a materialized __end__ node")
+	assert.Equal(t, "end", endNode["type"])
+
+	found := false
+	for _, e := range graphEdges(t, g) {
+		if e["from"] == "bye" && e["to"] == "__end__" {
+			found = true
+		}
+	}
+	assert.True(t, found, "edge to __end__ must be kept")
+}
+
+// Location steps need their input type on the node so the runner captures
+// the shared-location payload instead of treating it as free text.
+func TestStepsToGraph_LocationStepKeepsInputType(t *testing.T) {
+	steps := []models.ChatbotFlowStep{
+		{
+			StepName: "where", StepOrder: 1, MessageType: "text", Message: "Share location",
+			InputType: models.InputTypeLocation, StoreAs: "location",
+		},
+	}
+	nodes := graphNodes(t, stepsToGraph(steps, nil))
+	require.Equal(t, "prompt", nodes[1]["type"])
+	cfg, _ := nodes[1]["config"].(map[string]any)
+	assert.Equal(t, "location", cfg["input_type"])
+	assert.Equal(t, "location", cfg["store_as"])
+}
+
 func TestStepsToGraph_ButtonsStepEmitsPerButtonEdges(t *testing.T) {
 	steps := []models.ChatbotFlowStep{
 		{
@@ -282,7 +386,9 @@ func TestBackfillChatbotFlowGraph_FillsNullGraphsAndLeavesOthersAlone(t *testing
 	}
 	require.NoError(t, app.DB.Create(v2flow).Error)
 
-	require.NoError(t, BackfillChatbotFlowGraph(app.DB, app.Log))
+	converted, err := BackfillChatbotFlowGraph(app.DB, app.Log)
+	require.NoError(t, err)
+	assert.Equal(t, 1, converted)
 
 	var legacyAfter models.ChatbotFlow
 	require.NoError(t, app.DB.First(&legacyAfter, legacyID).Error)
@@ -299,7 +405,23 @@ func TestBackfillChatbotFlowGraph_FillsNullGraphsAndLeavesOthersAlone(t *testing
 	assert.Equal(t, "m1", n0["id"])
 
 	// Idempotent.
-	require.NoError(t, BackfillChatbotFlowGraph(app.DB, app.Log))
+	converted, err = BackfillChatbotFlowGraph(app.DB, app.Log)
+	require.NoError(t, err)
+	assert.Zero(t, converted)
 }
 
 var _ = testutil.NopLogger // silence unused-import warning when read in isolation
+
+// The flow list's "Steps" column counts authored graph nodes; the fixed
+// start sentinel is not one of them.
+func TestGraphStepCount(t *testing.T) {
+	assert.Equal(t, 0, graphStepCount(nil))
+	assert.Equal(t, 0, graphStepCount(models.JSONB{}))
+
+	graph := models.JSONB{"nodes": []any{
+		map[string]any{"id": "__start__", "type": "start"},
+		map[string]any{"id": "m1", "type": "message"},
+		map[string]any{"id": "b1", "type": "buttons"},
+	}}
+	assert.Equal(t, 2, graphStepCount(graph))
+}

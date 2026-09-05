@@ -3,6 +3,8 @@ package handlers
 import (
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/zerodha/logf"
@@ -24,35 +26,47 @@ import (
 // The migration reads the legacy tables via raw queries so this package
 // no longer needs Steps[] / CanvasLayout fields on the ChatbotFlow
 // struct.
-func BackfillChatbotFlowGraph(db *gorm.DB, lo logf.Logger) error {
-	// Fresh installs never had the legacy schema — chatbot_flows lacks
-	// the canvas_layout column and chatbot_flow_steps does not exist.
-	// Skip in that case so a clean boot doesn't fail.
+// Returns the number of flows converted so the caller can drop the
+// chatbot flow Redis cache — it survives restarts and would otherwise
+// keep serving graph-less copies until its TTL expires.
+func BackfillChatbotFlowGraph(db *gorm.DB, lo logf.Logger) (int, error) {
+	// Fresh installs never had the legacy schema — chatbot_flow_steps does
+	// not exist. Skip in that case so a clean boot doesn't fail.
+	//
+	// canvas_layout is optional: forks that stored node positions elsewhere
+	// (or DBs where the column was already dropped) still have convertible
+	// steps, they just fall back to auto-layout positions.
 	mig := db.Migrator()
-	if !mig.HasColumn(&models.ChatbotFlow{}, "canvas_layout") || !mig.HasTable("chatbot_flow_steps") {
-		return nil
+	if !mig.HasTable("chatbot_flow_steps") {
+		return 0, nil
+	}
+	hasCanvasLayout := mig.HasColumn(&models.ChatbotFlow{}, "canvas_layout")
+
+	layoutSelect := `'{}'::jsonb AS canvas_layout`
+	if hasCanvasLayout {
+		layoutSelect = `COALESCE(canvas_layout, '{}'::jsonb) AS canvas_layout`
 	}
 
 	var pending []legacyFlowMeta
-	err := db.Raw(`
-		SELECT id, name, COALESCE(canvas_layout, '{}'::jsonb) AS canvas_layout
+	err := db.Raw(fmt.Sprintf(`
+		SELECT id, name, %s
 		FROM chatbot_flows
 		WHERE (graph IS NULL OR graph::text = '{}')
 		  AND deleted_at IS NULL
-	`).Scan(&pending).Error
+	`, layoutSelect)).Scan(&pending).Error
 	if err != nil {
-		return fmt.Errorf("load flows for graph backfill: %w", err)
+		return 0, fmt.Errorf("load flows for graph backfill: %w", err)
 	}
 
 	if len(pending) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	converted, skipped := 0, 0
 	for _, p := range pending {
 		var steps []models.ChatbotFlowStep
 		if err := db.Where("flow_id = ?", p.ID).Find(&steps).Error; err != nil {
-			return fmt.Errorf("load steps for flow %s: %w", p.ID, err)
+			return converted, fmt.Errorf("load steps for flow %s: %w", p.ID, err)
 		}
 
 		graph := stepsToGraph(steps, p.CanvasLayout)
@@ -63,14 +77,14 @@ func BackfillChatbotFlowGraph(db *gorm.DB, lo logf.Logger) error {
 			continue
 		}
 		if err := db.Model(&models.ChatbotFlow{}).Where("id = ?", p.ID).Update("graph", graph).Error; err != nil {
-			return fmt.Errorf("save backfilled graph for flow %s: %w", p.ID, err)
+			return converted, fmt.Errorf("save backfilled graph for flow %s: %w", p.ID, err)
 		}
 		converted++
 	}
 
 	lo.Info("Chatbot flow graph backfill complete",
 		"converted", converted, "skipped", skipped, "total", len(pending))
-	return nil
+	return converted, nil
 }
 
 type legacyFlowMeta struct {
@@ -85,6 +99,11 @@ type legacyFlowMeta struct {
 //
 // Returns nil if there are no steps or any step uses a message_type
 // that has no v2 mapping.
+//
+// Legacy steps route to the "__end__" sentinel rather than a real step, so
+// a synthetic end node is appended whenever any edge targets it. The node
+// carries no message of its own — the flow-level completion message is sent
+// by the runner on completion, exactly as the v1 engine did.
 func stepsToGraph(steps []models.ChatbotFlowStep, canvasLayout models.JSONB) models.JSONB {
 	if len(steps) == 0 {
 		return nil
@@ -109,6 +128,9 @@ func stepsToGraph(steps []models.ChatbotFlowStep, canvasLayout models.JSONB) mod
 	for _, s := range sorted {
 		stepNames[s.StepName] = struct{}{}
 	}
+	// "__end__" is a v1 sentinel target, not a step row. Whitelist it so
+	// buildEdges keeps those edges; the matching node is appended below.
+	stepNames[legacyEndSentinel] = struct{}{}
 
 	for i, step := range sorted {
 		// v1 text steps that capture a reply become v2 prompt nodes
@@ -140,6 +162,18 @@ func stepsToGraph(steps []models.ChatbotFlowStep, canvasLayout models.JSONB) mod
 
 	edges := buildEdges(sorted, stepNames)
 
+	// Materialize the "__end__" sentinel as a real end node when anything
+	// routes to it.
+	if edgesTarget(edges, legacyEndSentinel) {
+		nodes = append(nodes, map[string]any{
+			"id":       legacyEndSentinel,
+			"type":     "end",
+			"label":    "End",
+			"position": map[string]any{"x": float64(300), "y": float64(len(sorted) * 150)},
+			"config":   map[string]any{},
+		})
+	}
+
 	// Prepend a fixed `start` sentinel node so the editor always has a
 	// non-deletable entry point. The first ordered step becomes the
 	// target of start's default edge.
@@ -167,12 +201,28 @@ func stepsToGraph(steps []models.ChatbotFlowStep, canvasLayout models.JSONB) mod
 	}
 }
 
+// legacyEndSentinel is the v1 next_step / conditional_next value meaning
+// "finish the flow here". It has no matching row in chatbot_flow_steps.
+const legacyEndSentinel = "__end__"
+
 // v2SupportedMessageType keeps the list of v1 → v2 mappings in lockstep
-// with the TS V2_SUPPORTED_MESSAGE_TYPES set.
+// with the TS V2_SUPPORTED_MESSAGE_TYPES set. "branch" is this fork's v1
+// condition step (input_config {variable, operator, value} +
+// conditional_next {true, false}) and maps onto the v2 condition node.
 func v2SupportedMessageType(mt models.FlowStepType) bool {
 	switch string(mt) {
-	case "text", "buttons", "end", "condition", "timing", "goto_flow", "api_fetch", "whatsapp_flow", "transfer":
+	case "text", "buttons", "end", "condition", "branch", "timing", "goto_flow", "api_fetch", "whatsapp_flow", "transfer":
 		return true
+	}
+	return false
+}
+
+// edgesTarget reports whether any edge points at the given node id.
+func edgesTarget(edges []map[string]any, target string) bool {
+	for _, e := range edges {
+		if to, _ := e["to"].(string); to == target {
+			return true
+		}
 	}
 	return false
 }
@@ -196,7 +246,7 @@ func messageTypeToNodeTypeGo(messageType string) string {
 		return "buttons"
 	case "end":
 		return "end"
-	case "condition":
+	case "condition", "branch":
 		return "condition"
 	case "timing":
 		return "timing"
@@ -242,6 +292,11 @@ func buildNodeConfig(nodeType string, step *models.ChatbotFlowStep) map[string]a
 		config["message"] = step.Message
 	case "prompt":
 		config["body"] = step.Message
+		// v1 typed inputs (location in particular) need special capture
+		// handling in the runner, so carry the type onto the node.
+		if step.InputType != "" && step.InputType != models.InputTypeNone {
+			config["input_type"] = string(step.InputType)
+		}
 		if step.ValidationRegex != "" {
 			config["validation_regex"] = step.ValidationRegex
 		}
@@ -265,8 +320,13 @@ func buildNodeConfig(nodeType string, step *models.ChatbotFlowStep) map[string]a
 			config["message"] = step.Message
 		}
 	case "condition":
-		expr, _ := getStringFromJSONB(step.InputConfig, "expression")
-		config["expression"] = expr
+		expression, _ := getStringFromJSONB(step.InputConfig, "expression")
+		if expression == "" {
+			// This fork's v1 `branch` step stored a structured comparison
+			// instead of an expression — translate it.
+			expression = legacyBranchExpression(step.InputConfig)
+		}
+		config["expression"] = expression
 	case "timing":
 		if schedule, ok := step.InputConfig["schedule"].([]any); ok {
 			config["schedule"] = schedule
@@ -337,6 +397,57 @@ func buildNodeConfig(nodeType string, step *models.ChatbotFlowStep) map[string]a
 	return config
 }
 
+// legacyBranchExpression translates a v1 branch step's input_config —
+// {"variable": "userExists", "operator": "equals", "value": "true"} — into
+// an expr-lang expression evaluated by execChatCondition.
+//
+// It mirrors the deleted evaluateBranchCondition: the variable is coerced
+// to a string, comparisons are case-insensitive, and an empty/unknown
+// operator means "is the variable truthy". Missing variables coerce to ""
+// via `?? ""` so the expression never errors out at runtime.
+//
+// Returns "" when no variable is configured — execChatCondition logs that
+// and routes to the "false" branch, matching v1's completeFlow-on-missing
+// -variable behavior closely enough to be debuggable.
+func legacyBranchExpression(inputConfig models.JSONB) string {
+	variable, _ := getStringFromJSONB(inputConfig, "variable")
+	if variable == "" {
+		return ""
+	}
+	operator, _ := getStringFromJSONB(inputConfig, "operator")
+	value, _ := getStringFromJSONB(inputConfig, "value")
+
+	// `v` is the raw value (nil when unset), `s` its string coercion.
+	v := variable
+	s := fmt.Sprintf("string(%s ?? \"\")", variable)
+	quoted := strconv.Quote(value)
+	lowered := strconv.Quote(strings.ToLower(value))
+
+	switch operator {
+	case "equals", "eq", "==":
+		return fmt.Sprintf("lower(%s) == %s", s, lowered)
+	case "not_equals", "neq", "!=":
+		return fmt.Sprintf("lower(%s) != %s", s, lowered)
+	case "exists":
+		return fmt.Sprintf("%s != nil", v)
+	case "not_exists":
+		return fmt.Sprintf("%s == nil", v)
+	case "not_empty":
+		return fmt.Sprintf("%s != nil && %s != \"\"", v, s)
+	case "empty":
+		return fmt.Sprintf("%s == nil || %s == \"\"", v, s)
+	case "contains":
+		return fmt.Sprintf("indexOf(lower(%s), %s) != -1", s, lowered)
+	case "gt", ">":
+		return fmt.Sprintf("%s > %s", s, quoted)
+	case "lt", "<":
+		return fmt.Sprintf("%s < %s", s, quoted)
+	default:
+		// v1 default: truthiness of the variable.
+		return fmt.Sprintf("%s != nil && %s != \"\" && lower(%s) != \"false\" && %s != \"0\"", v, s, s, s)
+	}
+}
+
 func buildEdges(sorted []models.ChatbotFlowStep, stepNames map[string]struct{}) []map[string]any {
 	edges := make([]map[string]any, 0)
 
@@ -350,7 +461,7 @@ func buildEdges(sorted []models.ChatbotFlowStep, stepNames map[string]struct{}) 
 		switch mt {
 		case "buttons":
 			edges = append(edges, buttonsEdges(step, nextSequential, stepNames)...)
-		case "condition":
+		case "condition", "branch":
 			edges = append(edges, branchEdges(step, []string{"true", "false"}, stepNames)...)
 		case "timing":
 			edges = append(edges, branchEdges(step, []string{"in_hours", "out_of_hours"}, stepNames)...)

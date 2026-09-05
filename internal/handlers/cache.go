@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 	"github.com/shridarpatil/whatomate/internal/models"
 	"github.com/shridarpatil/whatomate/internal/websocket"
 	"gorm.io/gorm"
@@ -186,6 +187,20 @@ func (a *App) InvalidateChatbotFlowsCache(orgID uuid.UUID) {
 	ctx := context.Background()
 	cacheKey := fmt.Sprintf("%s%s", flowsCachePrefix, orgID.String())
 	a.Redis.Del(ctx, cacheKey)
+}
+
+// PurgeChatbotFlowsCache drops the cached flow lists for every organization.
+// Used at boot after the v2 graph backfill rewrites flow rows behind the
+// cache's back; regular edits go through InvalidateChatbotFlowsCache.
+func PurgeChatbotFlowsCache(rdb *redis.Client) error {
+	ctx := context.Background()
+	iter := rdb.Scan(ctx, 0, flowsCachePrefix+"*", 100).Iterator()
+	for iter.Next(ctx) {
+		if err := rdb.Del(ctx, iter.Val()).Err(); err != nil {
+			return err
+		}
+	}
+	return iter.Err()
 }
 
 // InvalidateKeywordRulesCache invalidates the keyword rules cache for an organization

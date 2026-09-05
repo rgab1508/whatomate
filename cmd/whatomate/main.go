@@ -157,11 +157,6 @@ func runServer(args []string) {
 		if err := database.RunMigrationWithProgress(db, &cfg.DefaultAdmin); err != nil {
 			lo.Fatal("Migration failed", "error", err)
 		}
-		// Backfill v2 graph for any legacy chatbot flow still on Steps[].
-		// Idempotent — re-running is a no-op once every row is converted.
-		if err := handlers.BackfillChatbotFlowGraph(db, lo); err != nil {
-			lo.Fatal("Chatbot flow graph backfill failed", "error", err)
-		}
 	}
 
 	// Connect to Redis
@@ -170,6 +165,23 @@ func runServer(args []string) {
 		lo.Fatal("Failed to connect to Redis", "error", err)
 	}
 	lo.Info("Connected to Redis")
+
+	// Backfill v2 graph for any legacy chatbot flow still on Steps[]. Runs
+	// on every boot, not just with -migrate: the v2 runner ignores flows
+	// without a Graph, so a server started without the flag would silently
+	// stop triggering every legacy flow. Idempotent — a no-op (two cheap
+	// queries) once every row is converted.
+	converted, err := handlers.BackfillChatbotFlowGraph(db, lo)
+	if err != nil {
+		lo.Fatal("Chatbot flow graph backfill failed", "error", err)
+	}
+	if converted > 0 {
+		// The flow cache outlives the process, so freshly converted flows
+		// would keep being served graph-less until its TTL expired.
+		if err := handlers.PurgeChatbotFlowsCache(rdb); err != nil {
+			lo.Error("Failed to purge chatbot flows cache after backfill", "error", err)
+		}
+	}
 
 	// Initialize job queue
 	jobQueue := queue.NewRedisQueue(rdb, lo)
