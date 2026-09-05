@@ -86,6 +86,7 @@ type ChatbotFlowResponse struct {
 	Description     string             `json:"description"`
 	TriggerKeywords []string           `json:"trigger_keywords"`
 	TriggerType     models.TriggerType `json:"trigger_type"`
+	TriggerButtonID string             `json:"trigger_button_id,omitempty"`
 	WebhookToken    string             `json:"webhook_token,omitempty"`
 	WebhookURL      string             `json:"webhook_url,omitempty"`
 	Enabled         bool               `json:"enabled"`
@@ -856,6 +857,7 @@ func (a *App) ListChatbotFlows(r *fastglue.Request) error {
 			Description:     flow.Description,
 			TriggerKeywords: flow.TriggerKeywords,
 			TriggerType:     triggerType,
+			TriggerButtonID: flow.TriggerButtonID,
 			Enabled:         flow.IsEnabled,
 			CreatedAt:       flow.CreatedAt.Format(time.RFC3339),
 		}
@@ -863,10 +865,36 @@ func (a *App) ListChatbotFlows(r *fastglue.Request) error {
 			resp.WebhookToken = *flow.WebhookToken
 			resp.WebhookURL = "/api/webhook-trigger/" + *flow.WebhookToken
 		}
+		resp.StepsCount = graphStepCount(flow.Graph)
 		response[i] = resp
 	}
 
 	return r.SendEnvelope(listEnvelope("flows", response, total, pg))
+}
+
+// graphStepCount counts the authored nodes in a v2 graph for the flow
+// list's "Steps" column. The fixed start sentinel isn't a step the author
+// wrote, so it doesn't count. Returns 0 for a flow with no graph.
+func graphStepCount(graph models.JSONB) int {
+	if graph == nil {
+		return 0
+	}
+	nodes, ok := graph["nodes"].([]any)
+	if !ok {
+		return 0
+	}
+	count := 0
+	for _, raw := range nodes {
+		node, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if nodeType, _ := node["type"].(string); nodeType == "start" {
+			continue
+		}
+		count++
+	}
+	return count
 }
 
 // CreateChatbotFlow creates a new chatbot flow

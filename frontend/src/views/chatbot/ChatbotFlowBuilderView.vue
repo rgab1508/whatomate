@@ -36,6 +36,9 @@ import {
   Plus,
   Trash2,
   Play,
+  Webhook,
+  Copy,
+  RefreshCw,
 } from 'lucide-vue-next'
 
 import AuditLogPanel from '@/components/shared/AuditLogPanel.vue'
@@ -73,6 +76,11 @@ const name = ref('')
 const description = ref('')
 const enabled = ref(true)
 const triggerKeywords = ref('')
+const triggerType = ref<'keywords' | 'button' | 'webhook'>('keywords')
+const triggerButtonID = ref('')
+const webhookToken = ref('')
+const webhookURL = ref('')
+const baseUrl = window.location.origin
 const initialMessage = ref('Hi! Let me help you with that.')
 const completionMessage = ref('Thank you! We have all the information we need.')
 const onCompleteAction = ref<'none' | 'webhook'>('none')
@@ -559,6 +567,10 @@ async function loadFlow() {
     description.value = flow.description || flow.Description || ''
     enabled.value = flow.is_enabled ?? flow.IsEnabled ?? flow.enabled ?? true
     triggerKeywords.value = (flow.trigger_keywords || flow.TriggerKeywords || []).join(', ')
+    triggerType.value = flow.trigger_type || flow.TriggerType || 'keywords'
+    triggerButtonID.value = flow.trigger_button_id || flow.TriggerButtonID || ''
+    webhookToken.value = flow.webhook_token || flow.WebhookToken || ''
+    webhookURL.value = flow.webhook_url || flow.WebhookURL || (webhookToken.value ? `/api/webhook-trigger/${webhookToken.value}` : '')
     initialMessage.value = flow.initial_message || flow.InitialMessage || ''
     completionMessage.value = flow.completion_message || flow.CompletionMessage || ''
     onCompleteAction.value = (flow.on_complete_action || flow.OnCompleteAction || 'none') as 'none' | 'webhook'
@@ -578,8 +590,16 @@ async function loadFlow() {
     updatedByName.value = flow.updated_by_name || flow.updated_by?.full_name || ''
 
     const graph = flow.graph || flow.Graph
-    if (graph && graph.version === 2) {
+    if (graph && Array.isArray(graph.nodes) && graph.nodes.length > 0) {
       loadGraph(graph)
+    } else {
+      // No graph on the flow — either a brand-new row or a legacy flow the
+      // server-side backfill hasn't converted yet. Seed the fixed start node
+      // so the canvas is an empty editable flow rather than a blank void.
+      ensureStartNode()
+      toast.warning(
+        t('flowBuilder.emptyGraph', 'This flow has no nodes yet. Start by adding one from the palette above.'),
+      )
     }
   } catch {
     loadError.value = true
@@ -610,7 +630,12 @@ async function saveFlow() {
     const data: Record<string, any> = {
       name: name.value,
       description: description.value,
-      trigger_keywords: triggerKeywords.value.split(',').map((k) => k.trim()).filter(Boolean),
+      trigger_type: triggerType.value,
+      trigger_keywords:
+        triggerType.value === 'webhook'
+          ? []
+          : triggerKeywords.value.split(',').map((k) => k.trim()).filter(Boolean),
+      trigger_button_id: triggerType.value === 'button' ? triggerButtonID.value : '',
       initial_message: initialMessage.value,
       completion_message: completionMessage.value,
       on_complete_action: onCompleteAction.value,
@@ -623,6 +648,11 @@ async function saveFlow() {
     if (isNewFlow.value) {
       const response = await chatbotService.createFlow(data)
       const newFlow = response.data.data || response.data
+      // A webhook flow gets its token minted server-side on create.
+      if (newFlow.webhook_token) {
+        webhookToken.value = newFlow.webhook_token
+        webhookURL.value = newFlow.webhook_url || `/api/webhook-trigger/${newFlow.webhook_token}`
+      }
       toast.success(t('common.createdSuccess', { resource: t('resources.Flow') }))
       router.replace(`/chatbot/flows/${newFlow.id}/edit`)
     } else {
@@ -679,8 +709,33 @@ function removeCompletionHeader(key: string) {
   hasUnsavedChanges.value = true
 }
 
+const webhookExamplePayload = JSON.stringify(
+  { phone_number: '919876543210', waba_number: '918888888888', data: { key: 'value' } },
+  null,
+  2,
+)
+
+function copyWebhookUrl() {
+  navigator.clipboard.writeText(`${baseUrl}${webhookURL.value}`)
+  toast.success(t('flowBuilder.webhookCopied', 'Webhook URL copied to clipboard'))
+}
+
+async function regenerateToken() {
+  if (!flowId.value || isNewFlow.value) return
+  try {
+    await chatbotService.updateFlow(flowId.value, { regenerate_token: true })
+    const response = await chatbotService.getFlow(flowId.value)
+    const flow = response.data.data || response.data
+    webhookToken.value = flow.webhook_token || ''
+    webhookURL.value = flow.webhook_url || (webhookToken.value ? `/api/webhook-trigger/${webhookToken.value}` : '')
+    toast.success(t('flowBuilder.tokenRegenerated', 'Webhook token regenerated'))
+  } catch {
+    toast.error(t('flowBuilder.tokenRegenerateFailed', 'Failed to regenerate token'))
+  }
+}
+
 // Mark changes from text inputs.
-watch([name, description, enabled, triggerKeywords, initialMessage, completionMessage, onCompleteAction, panelConfig], () => {
+watch([name, description, enabled, triggerKeywords, triggerType, triggerButtonID, initialMessage, completionMessage, onCompleteAction, panelConfig], () => {
   if (!isLoading.value) hasUnsavedChanges.value = true
 })
 
@@ -801,11 +856,71 @@ onMounted(async () => {
               <CardTitle class="text-sm font-medium">{{ $t('flowBuilder.flowSettings') }}</CardTitle>
             </CardHeader>
 
-            <!-- Trigger keywords -->
+            <!-- Trigger type -->
             <div class="space-y-1.5">
+              <Label class="text-xs">{{ $t('flowBuilder.triggerType', 'Trigger Type') }}</Label>
+              <Select v-model="triggerType">
+                <SelectTrigger class="h-8 text-xs"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="keywords">{{ $t('flowBuilder.triggerKeywordsOption', 'Keywords') }}</SelectItem>
+                  <SelectItem value="button">{{ $t('flowBuilder.triggerButtonOption', 'Template Button') }}</SelectItem>
+                  <SelectItem value="webhook">{{ $t('flowBuilder.triggerWebhookOption', 'Webhook') }}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <!-- Trigger keywords -->
+            <div class="space-y-1.5" v-if="triggerType === 'keywords'">
               <Label class="text-xs">{{ $t('flowBuilder.triggerKeywords') }}</Label>
               <Input v-model="triggerKeywords" :placeholder="$t('flowBuilder.triggerKeywordsPlaceholder')" class="h-8 text-xs" />
               <p class="text-[10px] text-muted-foreground">{{ $t('flowBuilder.triggerKeywordsHint') }}</p>
+            </div>
+
+            <!-- Template button trigger -->
+            <div class="space-y-3" v-else-if="triggerType === 'button'">
+              <div class="space-y-1.5">
+                <Label class="text-xs">{{ $t('flowBuilder.buttonPayload', 'Button Payload') }}</Label>
+                <Input v-model="triggerButtonID" placeholder="e.g. order_on_whatsapp" class="h-8 text-xs" />
+                <p class="text-[10px] text-muted-foreground">
+                  {{ $t('flowBuilder.buttonPayloadHint', "The payload value set on your template's quick reply button. Matched when a contact clicks the button.") }}
+                </p>
+              </div>
+              <div class="space-y-1.5">
+                <Label class="text-xs">{{ $t('flowBuilder.alsoMatchKeywords', 'Also match keywords (optional)') }}</Label>
+                <Input v-model="triggerKeywords" placeholder="order, buy now" class="h-8 text-xs" />
+                <p class="text-[10px] text-muted-foreground">
+                  {{ $t('flowBuilder.alsoMatchKeywordsHint', 'Comma-separated keywords that also trigger this flow from plain text messages.') }}
+                </p>
+              </div>
+            </div>
+
+            <!-- Webhook trigger -->
+            <div class="space-y-2" v-else-if="triggerType === 'webhook'">
+              <Label class="text-xs flex items-center gap-1">
+                <Webhook class="h-3 w-3" />
+                {{ $t('flowBuilder.webhookUrl', 'Webhook URL') }}
+              </Label>
+              <div v-if="webhookToken" class="space-y-2">
+                <div class="flex gap-1">
+                  <Input :model-value="`${baseUrl}${webhookURL}`" readonly class="h-8 text-xs font-mono bg-muted" />
+                  <Button variant="outline" size="sm" class="h-8 px-2 shrink-0" @click="copyWebhookUrl">
+                    <Copy class="h-3 w-3" />
+                  </Button>
+                </div>
+                <Button variant="ghost" size="sm" class="h-7 text-xs gap-1" @click="regenerateToken">
+                  <RefreshCw class="h-3 w-3" />
+                  {{ $t('flowBuilder.regenerateToken', 'Regenerate Token') }}
+                </Button>
+                <div class="bg-muted rounded-md p-2">
+                  <p class="text-[10px] text-muted-foreground font-medium mb-1">
+                    {{ $t('flowBuilder.examplePayload', 'Example payload:') }}
+                  </p>
+                  <pre class="text-[10px] text-muted-foreground font-mono whitespace-pre-wrap">{{ webhookExamplePayload }}</pre>
+                </div>
+              </div>
+              <p v-else class="text-[10px] text-muted-foreground">
+                {{ $t('flowBuilder.saveToGenerateWebhook', 'Save the flow to generate a webhook URL.') }}
+              </p>
             </div>
 
             <Separator />

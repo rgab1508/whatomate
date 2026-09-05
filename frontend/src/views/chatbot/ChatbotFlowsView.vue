@@ -21,6 +21,8 @@ interface ChatbotFlow {
   name: string
   description: string
   trigger_keywords: string[]
+  trigger_type?: 'keywords' | 'button' | 'webhook'
+  trigger_button_id?: string
   steps_count: number
   enabled: boolean
   created_at: string
@@ -194,13 +196,24 @@ async function confirmDeleteFlow() {
                 </template>
                 <template #cell-trigger_keywords="{ item: flow }">
                   <div class="flex flex-wrap gap-1">
+                    <!-- Webhook and template-button flows have no keywords to
+                         show; name the trigger instead of rendering a dash. -->
+                    <Badge v-if="flow.trigger_type === 'webhook'" variant="outline" class="text-xs">
+                      {{ $t('chatbotFlows.webhookTrigger', 'Webhook') }}
+                    </Badge>
+                    <Badge v-else-if="flow.trigger_type === 'button' && flow.trigger_button_id" variant="outline" class="text-xs">
+                      {{ flow.trigger_button_id }}
+                    </Badge>
                     <Badge v-for="keyword in flow.trigger_keywords?.slice(0, 2)" :key="keyword" variant="secondary" class="text-xs">
                       {{ keyword }}
                     </Badge>
                     <Badge v-if="flow.trigger_keywords?.length > 2" variant="outline" class="text-xs">
                       +{{ flow.trigger_keywords.length - 2 }}
                     </Badge>
-                    <span v-if="!flow.trigger_keywords?.length" class="text-muted-foreground text-sm">—</span>
+                    <span
+                      v-if="!flow.trigger_keywords?.length && flow.trigger_type !== 'webhook' && !flow.trigger_button_id"
+                      class="text-muted-foreground text-sm"
+                    >—</span>
                   </div>
                 </template>
                 <template #cell-steps_count="{ item: flow }">
