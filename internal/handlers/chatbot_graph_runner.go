@@ -1,10 +1,13 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
@@ -35,6 +38,37 @@ type chatNodeCtx struct {
 	buttonID         string
 	flowResponseData map[string]any // form fields from a WhatsApp Flow submission
 	consumed         bool
+
+	// Node the run resumed at, captured before traversal begins. Only that
+	// node may treat this inbound as its own input — nodes reached later in
+	// the same run were not waiting for it. Without this, a buttons node
+	// traversed into mid-run would mistake the previous node's text for a
+	// failed button choice.
+	resumedAt string
+
+	// staticCtx holds the contact / account / organization namespaces that
+	// {{contact.phone_number}} & friends resolve against. Built once per run
+	// (they can't change mid-run) and merged over SessionData at render time
+	// rather than stored in it, so the persisted session row stays clean.
+	staticCtx map[string]any
+}
+
+// templateData is the variable scope for every {{...}} in a node config:
+// captured session variables plus the contact / account / organization
+// namespaces. Session variables win on a key clash.
+func (c *chatNodeCtx) templateData() models.JSONB {
+	data := make(models.JSONB, len(c.session.SessionData)+len(c.staticCtx))
+	maps.Copy(data, c.staticCtx)
+	maps.Copy(data, c.session.SessionData)
+	return data
+}
+
+// render interpolates a node config string against templateData.
+func (c *chatNodeCtx) render(s string) string {
+	if s == "" {
+		return ""
+	}
+	return processTemplate(s, c.templateData())
 }
 
 // nodeOutcome is the return value of a node executor.
@@ -79,6 +113,12 @@ func (a *App) runChatGraph(
 		return errors.New("flow has no v2 graph; legacy executor should have run")
 	}
 
+	var org *models.Organization
+	var orgRow models.Organization
+	if err := a.DB.Where("id = ?", account.OrganizationID).First(&orgRow).Error; err == nil {
+		org = &orgRow
+	}
+
 	ctx := &chatNodeCtx{
 		account:          account,
 		contact:          contact,
@@ -86,6 +126,7 @@ func (a *App) runChatGraph(
 		userInput:        userInput,
 		buttonID:         buttonID,
 		flowResponseData: flowResponseData,
+		staticCtx:        buildChatbotAPIContext(account, contact, org),
 	}
 
 	// Seed built-in template variables so {{phone_number}} / {{contact_name}}
@@ -101,11 +142,25 @@ func (a *App) runChatGraph(
 	if session.CurrentStep == "" {
 		session.CurrentStep = graph.EntryNode
 		a.logFlowEvent(session.ID, flow.ID, graph.EntryNode, models.FlowLogFlowStarted, flow.Name, nil)
+		// Flow-level greeting, sent before the entry node runs.
+		if msg := ctx.render(flow.InitialMessage); msg != "" {
+			if err := a.sendAndSaveTextMessage(account, contact, msg); err != nil {
+				a.Log.Error("Failed to send flow initial message",
+					"error", err, "flow", flow.ID, "contact", contact.PhoneNumber)
+			} else {
+				a.logSessionMessage(session.ID, models.DirectionOutgoing, msg, "flow_start")
+			}
+		}
 		// Trigger input is not "for" the entry node — clear it so we don't
 		// double-count the trigger keyword as user input.
 		ctx.userInput = ""
 		ctx.buttonID = ""
+	} else if a.cancelChatFlow(ctx, flow) {
+		// Mid-flow cancel keyword ("stop", "cancel", ...) ends the run here.
+		return nil
 	}
+	// Whatever node we resume at owns this inbound message.
+	ctx.resumedAt = session.CurrentStep
 
 	for range maxChatGraphIterations {
 		node := graph.Node(session.CurrentStep)
@@ -128,8 +183,7 @@ func (a *App) runChatGraph(
 				a.logFlowEvent(session.ID, flow.ID, node.ID, models.FlowLogStepSkipped, expr, nil)
 				next := graph.ResolveEdge(node.ID, "default")
 				if next == "" {
-					session.Status = models.SessionStatusCompleted
-					return a.persistChatSession(session)
+					return a.completeChatFlow(ctx, flow, node.ID)
 				}
 				session.CurrentStep = next
 				continue
@@ -181,9 +235,7 @@ func (a *App) runChatGraph(
 		next := graph.ResolveEdge(node.ID, res.outcome)
 		if next == "" {
 			// No matching edge → terminal.
-			session.Status = models.SessionStatusCompleted
-			a.logFlowEvent(session.ID, flow.ID, node.ID, models.FlowLogFlowCompleted, flow.Name, nil)
-			return a.persistChatSession(session)
+			return a.completeChatFlow(ctx, flow, node.ID)
 		}
 		session.CurrentStep = next
 	}
@@ -243,7 +295,7 @@ func (a *App) execChatMessage(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, er
 	if text == "" {
 		return nodeOutcome{outcome: "default"}, nil
 	}
-	text = processTemplate(text, ctx.session.SessionData)
+	text = ctx.render(text)
 	if err := a.sendAndSaveTextMessage(ctx.account, ctx.contact, text); err != nil {
 		return nodeOutcome{}, fmt.Errorf("send message: %w", err)
 	}
@@ -276,11 +328,20 @@ func (a *App) execChatButtons(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, er
 		return nodeOutcome{outcome: "button:" + ctx.buttonID}, nil
 	}
 
+	// Typed a reply instead of tapping a button, while this node was the one
+	// waiting. Previously execution fell straight through and re-sent the same
+	// buttons, so anyone who answered in words — which is exactly what someone
+	// with a problem does — was re-prompted on every message with no way out.
+	if !ctx.consumed && ctx.userInput != "" && ctx.resumedAt == node.ID {
+		ctx.consumed = true
+		return a.handleChatButtonsUnmatched(node, ctx)
+	}
+
 	body := stringFromConfig(node.Config, "body", "message", "text")
 	if body == "" {
 		body = node.Label
 	}
-	body = processTemplate(body, ctx.session.SessionData)
+	body = ctx.render(body)
 	buttons := buttonsFromConfig(node.Config)
 	if len(buttons) == 0 {
 		return nodeOutcome{}, fmt.Errorf("buttons node %q has no buttons configured", node.ID)
@@ -290,12 +351,63 @@ func (a *App) execChatButtons(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, er
 	for _, b := range buttons {
 		for _, key := range []string{"title", "url", "phone_number"} {
 			if s, ok := b[key].(string); ok && s != "" {
-				b[key] = processTemplate(s, ctx.session.SessionData)
+				b[key] = ctx.render(s)
 			}
 		}
 	}
 	if err := a.sendAndSaveInteractiveButtons(ctx.account, ctx.contact, body, buttons); err != nil {
 		return nodeOutcome{}, fmt.Errorf("send buttons: %w", err)
+	}
+	a.logSessionMessage(ctx.session.ID, models.DirectionOutgoing, body, node.ID)
+	return nodeOutcome{yield: true}, nil
+}
+
+// handleChatButtonsUnmatched deals with free text sent to a buttons node.
+//
+// Mirrors handleChatPromptInvalid, with one difference: the nudge is sent as
+// the body of the buttons themselves rather than a separate text message. The
+// user still has to choose, and WhatsApp scrolls interactive messages away, so
+// a bare "please tap a button" would leave nothing to tap.
+//
+// After max_retries the node emits "max_retries" so the graph can route to a
+// human handoff. If no such edge is authored ResolveEdge returns "", the
+// runner treats the node as terminal and completes the flow — so even an
+// unmodified graph lets the user out instead of looping.
+//
+// Config (all optional):
+//
+//	{
+//	  "invalid_message": "...",  // body used on a retry; default below
+//	  "max_retries": 3
+//	}
+func (a *App) handleChatButtonsUnmatched(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, error) {
+	ctx.session.StepRetries++
+
+	maxRetries := intFromConfig(node.Config, "max_retries", 3)
+	if ctx.session.StepRetries >= maxRetries {
+		ctx.session.StepRetries = 0
+		return nodeOutcome{outcome: "max_retries"}, nil
+	}
+
+	body := stringFromConfig(node.Config, "invalid_message")
+	if body == "" {
+		body = "Sorry, I didn't catch that. Please tap one of the options below."
+	}
+	body = ctx.render(body)
+
+	buttons := buttonsFromConfig(node.Config)
+	if len(buttons) == 0 {
+		return nodeOutcome{}, fmt.Errorf("buttons node %q has no buttons configured", node.ID)
+	}
+	for _, b := range buttons {
+		for _, key := range []string{"title", "url", "phone_number"} {
+			if s, ok := b[key].(string); ok && s != "" {
+				b[key] = ctx.render(s)
+			}
+		}
+	}
+	if err := a.sendAndSaveInteractiveButtons(ctx.account, ctx.contact, body, buttons); err != nil {
+		return nodeOutcome{}, fmt.Errorf("send buttons retry: %w", err)
 	}
 	a.logSessionMessage(ctx.session.ID, models.DirectionOutgoing, body, node.ID)
 	return nodeOutcome{yield: true}, nil
@@ -328,7 +440,7 @@ func (a *App) execChatPrompt(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, err
 		if body == "" {
 			return nodeOutcome{}, fmt.Errorf("prompt node %q has no body configured", node.ID)
 		}
-		rendered := processTemplate(body, ctx.session.SessionData)
+		rendered := ctx.render(body)
 		if err := a.sendAndSaveTextMessage(ctx.account, ctx.contact, rendered); err != nil {
 			return nodeOutcome{}, fmt.Errorf("send prompt: %w", err)
 		}
@@ -344,6 +456,12 @@ func (a *App) execChatPrompt(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, err
 
 	ctx.consumed = true
 	input := ctx.userInput
+
+	// Location prompts carry a JSON payload (saved by extractMessageContent)
+	// rather than free text, and store a nested map so {{loc.latitude}} works.
+	if strings.EqualFold(stringFromConfig(node.Config, "input_type"), string(models.InputTypeLocation)) {
+		return a.execChatLocationPrompt(node, ctx, input)
+	}
 
 	validationRegex := stringFromConfig(node.Config, "validation_regex")
 	if validationRegex != "" {
@@ -368,6 +486,44 @@ func (a *App) execChatPrompt(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, err
 	return nodeOutcome{outcome: "default"}, nil
 }
 
+// execChatLocationPrompt handles a prompt node whose config sets
+// "input_type": "location". The inbound message content for a WhatsApp
+// location share is the JSON blob {latitude, longitude, name?, address?}
+// written by extractMessageContent, so anything that doesn't parse (a
+// plain text reply) is treated as invalid input and re-prompted.
+//
+// On success the payload is stored under store_as as a nested map — so
+// templates can use {{location.latitude}} — plus the flattened
+// <store_as>_lat / _lng / _name / _address keys the v1 engine wrote.
+func (a *App) execChatLocationPrompt(node *ChatNode, ctx *chatNodeCtx, input string) (nodeOutcome, error) {
+	var locationData map[string]any
+	if err := json.Unmarshal([]byte(input), &locationData); err != nil ||
+		locationData["latitude"] == nil || locationData["longitude"] == nil {
+		if stringFromConfig(node.Config, "validation_error") == "" {
+			node.Config["validation_error"] = "Please share your location using the attachment button → Location."
+		}
+		return a.handleChatPromptInvalid(node, ctx)
+	}
+
+	if storeAs := stringFromConfig(node.Config, "store_as"); storeAs != "" {
+		if ctx.session.SessionData == nil {
+			ctx.session.SessionData = models.JSONB{}
+		}
+		data := ctx.session.SessionData
+		data[storeAs] = locationData
+		data[storeAs+"_lat"] = locationData["latitude"]
+		data[storeAs+"_lng"] = locationData["longitude"]
+		if name, ok := locationData["name"].(string); ok && name != "" {
+			data[storeAs+"_name"] = name
+		}
+		if address, ok := locationData["address"].(string); ok && address != "" {
+			data[storeAs+"_address"] = address
+		}
+	}
+	ctx.session.StepRetries = 0
+	return nodeOutcome{outcome: "default"}, nil
+}
+
 func (a *App) handleChatPromptInvalid(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, error) {
 	ctx.session.StepRetries++
 
@@ -381,7 +537,7 @@ func (a *App) handleChatPromptInvalid(node *ChatNode, ctx *chatNodeCtx) (nodeOut
 	if errorMsg == "" {
 		errorMsg = "Invalid input. Please try again."
 	}
-	errorMsg = processTemplate(errorMsg, ctx.session.SessionData)
+	errorMsg = ctx.render(errorMsg)
 	if err := a.sendAndSaveTextMessage(ctx.account, ctx.contact, errorMsg); err != nil {
 		return nodeOutcome{}, fmt.Errorf("send validation error: %w", err)
 	}
@@ -422,7 +578,7 @@ func (a *App) execChatAPICall(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, er
 	sessionData := ctx.session.SessionData
 	sessionData["phone_number"] = ctx.session.PhoneNumber
 
-	replaceVar := func(s string) string { return processTemplate(s, sessionData) }
+	replaceVar := ctx.render
 	respBody, statusCode, err := a.executeConfiguredAPI(cfgJSONB, replaceVar)
 	if err != nil {
 		a.Log.Error("api_call node request failed",
@@ -453,7 +609,7 @@ func (a *App) execChatAPICall(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, er
 	// api_fetch's bundled "fetch + send" behavior so the converter can
 	// keep collapsing api_fetch steps onto a single api_call node.
 	if tmpl := stringFromConfig(node.Config, "message_template"); tmpl != "" {
-		rendered := processTemplate(tmpl, sessionData)
+		rendered := ctx.render(tmpl)
 		if rendered != "" {
 			if err := a.sendAndSaveTextMessage(ctx.account, ctx.contact, rendered); err != nil {
 				a.Log.Error("api_call node failed to send message_template",
@@ -636,7 +792,7 @@ func (a *App) execChatSetVariable(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome
 			ctx.session.SessionData[name] = raw
 			continue
 		}
-		ctx.session.SessionData[name] = processTemplate(tmpl, ctx.session.SessionData)
+		ctx.session.SessionData[name] = ctx.render(tmpl)
 	}
 	return nodeOutcome{outcome: "default"}, nil
 }
@@ -675,7 +831,7 @@ func (a *App) execChatAIResponse(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome,
 		if ctx.session.SessionData == nil {
 			ctx.session.SessionData = models.JSONB{}
 		}
-		userMessage = processTemplate(tmpl, ctx.session.SessionData)
+		userMessage = ctx.render(tmpl)
 	}
 
 	answer, err := a.generateAIResponse(settings, ctx.session, userMessage, ctx.account, ctx.contact)
@@ -715,7 +871,7 @@ func (a *App) execChatAIResponse(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome,
 //	}
 func (a *App) execChatTransfer(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, error) {
 	if body := stringFromConfig(node.Config, "body", "message", "text"); body != "" {
-		message := processTemplate(body, ctx.session.SessionData)
+		message := ctx.render(body)
 		if err := a.sendAndSaveTextMessage(ctx.account, ctx.contact, message); err != nil {
 			a.Log.Error("transfer node failed to send body",
 				"node", node.ID, "session", ctx.session.ID, "error", err)
@@ -726,7 +882,7 @@ func (a *App) execChatTransfer(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, e
 
 	notes := ""
 	if rawNotes := stringFromConfig(node.Config, "notes"); rawNotes != "" {
-		notes = processTemplate(rawNotes, ctx.session.SessionData)
+		notes = ctx.render(rawNotes)
 	}
 
 	teamIDStr := stringFromConfig(node.Config, "team_id")
@@ -769,7 +925,7 @@ func (a *App) execChatWebhook(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, er
 	sessionData := ctx.session.SessionData
 	sessionData["phone_number"] = ctx.session.PhoneNumber
 
-	replaceVar := func(s string) string { return processTemplate(s, sessionData) }
+	replaceVar := ctx.render
 	_, statusCode, err := a.executeConfiguredAPI(models.JSONB(node.Config), replaceVar)
 	switch {
 	case err != nil:
@@ -823,7 +979,10 @@ func (a *App) execChatGotoFlow(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, e
 			"node", node.ID, "flow_id", targetID)
 		return nodeOutcome{}, nil
 	}
-	if target.WhatsAppAccount != ctx.session.WhatsAppAccount {
+	// An empty account on the target means an org-level flow that serves every
+	// account — the same scope keyword/button triggering already uses. Only a
+	// target pinned to a different account is refused.
+	if target.WhatsAppAccount != "" && target.WhatsAppAccount != ctx.session.WhatsAppAccount {
 		a.Log.Warn("goto_flow target belongs to a different WA account; refusing",
 			"node", node.ID, "target_account", target.WhatsAppAccount,
 			"session_account", ctx.session.WhatsAppAccount)
@@ -888,9 +1047,9 @@ func (a *App) execChatWhatsAppFlow(node *ChatNode, ctx *chatNodeCtx) (nodeOutcom
 		return nodeOutcome{outcome: "default"}, nil
 	}
 
-	body := processTemplate(stringFromConfig(node.Config, "body", "message", "text"), ctx.session.SessionData)
-	header := processTemplate(stringFromConfig(node.Config, "header"), ctx.session.SessionData)
-	cta := processTemplate(stringFromConfig(node.Config, "cta"), ctx.session.SessionData)
+	body := ctx.render(stringFromConfig(node.Config, "body", "message", "text"))
+	header := ctx.render(stringFromConfig(node.Config, "header"))
+	cta := ctx.render(stringFromConfig(node.Config, "cta"))
 
 	// Look up the first screen — same pattern as the legacy executor so
 	// existing WhatsAppFlow rows continue to work.
@@ -929,13 +1088,164 @@ func (a *App) execChatWhatsAppFlow(node *ChatNode, ctx *chatNodeCtx) (nodeOutcom
 // Config: { "message": "..." } (optional)
 func (a *App) execChatEnd(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, error) {
 	if msg := stringFromConfig(node.Config, "message"); msg != "" {
-		msg = processTemplate(msg, ctx.session.SessionData)
+		msg = ctx.render(msg)
 		if err := a.sendAndSaveTextMessage(ctx.account, ctx.contact, msg); err != nil {
 			return nodeOutcome{}, fmt.Errorf("send end message: %w", err)
 		}
 		a.logSessionMessage(ctx.session.ID, models.DirectionOutgoing, msg, node.ID)
 	}
 	return nodeOutcome{}, nil
+}
+
+// cancelChatFlow checks the inbound text against the flow's cancel
+// keywords. On a match it tells the user, logs the cancellation, and
+// tears the session down; the caller returns immediately.
+//
+// Only applies to a resumed run — the trigger message that started the
+// flow is never treated as a cancel.
+func (a *App) cancelChatFlow(ctx *chatNodeCtx, flow *models.ChatbotFlow) bool {
+	if ctx.userInput == "" || len(flow.CancelKeywords) == 0 {
+		return false
+	}
+	input := strings.ToLower(ctx.userInput)
+	for _, kw := range flow.CancelKeywords {
+		if kw == "" || !strings.Contains(input, strings.ToLower(kw)) {
+			continue
+		}
+		msg := ctx.render("Flow cancelled.")
+		if err := a.sendAndSaveTextMessage(ctx.account, ctx.contact, msg); err != nil {
+			a.Log.Error("Failed to send flow cancel message",
+				"error", err, "contact", ctx.contact.PhoneNumber)
+		}
+		a.logSessionMessage(ctx.session.ID, models.DirectionOutgoing, msg, "flow_cancel")
+		a.logFlowEvent(ctx.session.ID, flow.ID, ctx.session.CurrentStep, models.FlowLogFlowCancelled,
+			fmt.Sprintf("Flow cancelled by user input: '%s'", ctx.userInput),
+			map[string]any{"cancel_keyword": kw, "user_input": ctx.userInput})
+		a.exitFlow(ctx.session)
+		return true
+	}
+	return false
+}
+
+// completeChatFlow is the single terminal path for a graph run: mark the
+// session completed, send the flow-level completion message, fire the
+// on-complete webhook, and stop SLA tracking. Mirrors the v1 engine's
+// completeFlow so flow-level settings keep working under the v2 runner.
+func (a *App) completeChatFlow(ctx *chatNodeCtx, flow *models.ChatbotFlow, lastNodeID string) error {
+	session := ctx.session
+	session.Status = models.SessionStatusCompleted
+	a.logFlowEvent(session.ID, flow.ID, lastNodeID, models.FlowLogFlowCompleted, flow.Name, nil)
+
+	if msg := ctx.render(flow.CompletionMessage); msg != "" {
+		if err := a.sendAndSaveTextMessage(ctx.account, ctx.contact, msg); err != nil {
+			a.Log.Error("Failed to send flow completion message",
+				"error", err, "flow", flow.ID, "contact", ctx.contact.PhoneNumber)
+		} else {
+			a.logSessionMessage(session.ID, models.DirectionOutgoing, msg, "flow_complete")
+		}
+	}
+
+	err := a.persistChatSession(session)
+
+	if flow.OnCompleteAction == "webhook" && len(flow.CompletionConfig) > 0 {
+		// Snapshot the session: the webhook fires in the background and the
+		// caller may keep mutating the live struct.
+		snapshot := *session
+		go a.sendFlowCompletionWebhook(flow, &snapshot, ctx.contact, ctx.templateData())
+	}
+
+	// Stop the chatbot SLA clock — the bot is done talking.
+	if ctx.contact != nil {
+		a.ClearContactChatbotTracking(ctx.contact.ID)
+	}
+	return err
+}
+
+// sendFlowCompletionWebhook POSTs the finished session to the flow's
+// configured URL (flow settings → "On completion → Send to webhook").
+// tmplData is the render scope so the URL, headers, and custom body can
+// interpolate session variables and {{contact.*}} / {{organization.*}}.
+//
+// Default body when none is configured:
+//
+//	{flow_id, flow_name, session_id, phone_number, contact_id,
+//	 contact_name, session_data, completed_at}
+func (a *App) sendFlowCompletionWebhook(
+	flow *models.ChatbotFlow,
+	session *models.ChatbotSession,
+	contact *models.Contact,
+	tmplData models.JSONB,
+) {
+	config := flow.CompletionConfig
+
+	webhookURL, _ := config["url"].(string)
+	if webhookURL == "" {
+		a.Log.Error("Flow completion webhook has no URL configured", "flow", flow.ID)
+		return
+	}
+	webhookURL = processTemplate(webhookURL, tmplData)
+
+	method := "POST"
+	if m, ok := config["method"].(string); ok && m != "" {
+		method = strings.ToUpper(m)
+	}
+
+	var bodyReader io.Reader
+	if bodyTemplate, ok := config["body"].(string); ok && bodyTemplate != "" {
+		bodyReader = strings.NewReader(processTemplate(bodyTemplate, tmplData))
+	} else {
+		payload := map[string]any{
+			"flow_id":      flow.ID.String(),
+			"flow_name":    flow.Name,
+			"session_id":   session.ID.String(),
+			"phone_number": session.PhoneNumber,
+			"session_data": session.SessionData,
+			"completed_at": time.Now().UTC().Format(time.RFC3339),
+		}
+		if contact != nil {
+			payload["contact_id"] = contact.ID.String()
+			payload["contact_name"] = contact.ProfileName
+		}
+		jsonPayload, err := json.Marshal(payload)
+		if err != nil {
+			a.Log.Error("Failed to marshal flow completion webhook payload", "error", err, "flow", flow.ID)
+			return
+		}
+		bodyReader = bytes.NewReader(jsonPayload)
+	}
+
+	req, err := http.NewRequest(method, webhookURL, bodyReader)
+	if err != nil {
+		a.Log.Error("Failed to build flow completion webhook request", "error", err, "flow", flow.ID)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Whatomate-Webhook/1.0")
+	if headers, ok := config["headers"].(map[string]any); ok {
+		for key, value := range headers {
+			if strVal, ok := value.(string); ok {
+				req.Header.Set(key, processTemplate(strVal, tmplData))
+			}
+		}
+	}
+
+	logURL := redactURLForLog(webhookURL)
+	resp, err := a.HTTPClient.Do(req)
+	if err != nil {
+		a.Log.Error("Flow completion webhook failed", "error", err, "url", logURL, "flow", flow.ID)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		a.Log.Error("Flow completion webhook returned error",
+			"flow", flow.ID, "session", session.ID, "url", logURL,
+			"status", resp.StatusCode, "response", truncateLogValue(string(body), 300))
+		return
+	}
+	a.Log.Info("Flow completion webhook sent",
+		"flow", flow.ID, "session", session.ID, "status", resp.StatusCode)
 }
 
 // persistChatSession writes the running session state back to the DB.

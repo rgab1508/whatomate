@@ -213,8 +213,10 @@ func TestRunChatGraph_ButtonsRePromptOnText(t *testing.T) {
 	assert.Equal(t, "b1", session.CurrentStep)
 	assert.Equal(t, models.SessionStatusActive, session.Status)
 
-	// Second inbound: text instead of button click. Should re-send (stays
-	// at b1, status still active, path has another b1 entry).
+	// Second inbound: text instead of button click. Re-prompts (stays at b1,
+	// status still active, path has another b1 entry). This is retry 1 of the
+	// default 3 — see TestRunChatGraph_ButtonsEscapeAfterMaxRetries for what
+	// happens when they keep typing.
 	require.NoError(t, app.runChatGraph(account, contact, session, flow, "huh?", "", nil))
 	require.NoError(t, app.DB.First(session, session.ID).Error)
 	assert.Equal(t, "b1", session.CurrentStep)
@@ -365,6 +367,180 @@ func newPromptFlow(t *testing.T, app *App, org *models.Organization, account *mo
 	}
 	require.NoError(t, app.DB.Create(flow).Error)
 	return flow
+}
+
+// Flow-level settings (initial message, completion message, cancel
+// keywords, on-complete webhook) are edited in the flow settings panel and
+// must keep working under the v2 graph runner.
+func TestRunChatGraph_FlowLevelInitialAndCompletionMessages(t *testing.T) {
+	app, org, account, contact, session := newGraphTestFixtures(t)
+	flow := &models.ChatbotFlow{
+		BaseModel:         models.BaseModel{ID: uuid.New()},
+		OrganizationID:    org.ID,
+		WhatsAppAccount:   account.Name,
+		Name:              "greeting-flow",
+		IsEnabled:         true,
+		InitialMessage:    "Welcome {{contact.phone_number}}!",
+		CompletionMessage: "All done, thanks.",
+		Graph: models.JSONB{
+			"version":    2,
+			"entry_node": "m1",
+			"nodes": []any{
+				map[string]any{"id": "m1", "type": "message", "config": map[string]any{"message": "body"}},
+			},
+			"edges": []any{},
+		},
+	}
+	require.NoError(t, app.DB.Create(flow).Error)
+
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "start", "", nil))
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+	assert.Equal(t, models.SessionStatusCompleted, session.Status)
+
+	var msgs []models.ChatbotSessionMessage
+	require.NoError(t, app.DB.Where("session_id = ? AND direction = ?", session.ID, models.DirectionOutgoing).
+		Order("created_at").Find(&msgs).Error)
+	var texts []string
+	for _, m := range msgs {
+		texts = append(texts, m.Message)
+	}
+	assert.Contains(t, texts, "Welcome "+contact.PhoneNumber+"!", "flow initial_message should be sent on start")
+	assert.Contains(t, texts, "All done, thanks.", "flow completion_message should be sent on completion")
+}
+
+func TestRunChatGraph_CancelKeywordEndsFlow(t *testing.T) {
+	app, org, account, contact, session := newGraphTestFixtures(t)
+	flow := newPromptFlow(t, app, org, account, "", 3)
+	flow.CancelKeywords = models.StringArray{"cancel"}
+	require.NoError(t, app.DB.Save(flow).Error)
+
+	// Park at the prompt, then cancel.
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "start", "", nil))
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "please CANCEL this", "", nil))
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+
+	assert.Equal(t, models.SessionStatusCompleted, session.Status)
+	assert.Empty(t, session.CurrentStep, "cancel should clear the current step")
+	assert.Nil(t, session.SessionData["email"], "cancelled input must not be stored")
+}
+
+func TestRunChatGraph_OnCompleteWebhookFires(t *testing.T) {
+	type hookPayload struct {
+		FlowName    string         `json:"flow_name"`
+		PhoneNumber string         `json:"phone_number"`
+		SessionData map[string]any `json:"session_data"`
+	}
+	got := make(chan hookPayload, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var p hookPayload
+		_ = json.NewDecoder(r.Body).Decode(&p)
+		got <- p
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	app, org, account, contact, session := newGraphTestFixtures(t)
+	flow := &models.ChatbotFlow{
+		BaseModel:        models.BaseModel{ID: uuid.New()},
+		OrganizationID:   org.ID,
+		WhatsAppAccount:  account.Name,
+		Name:             "hooked-flow",
+		IsEnabled:        true,
+		OnCompleteAction: "webhook",
+		CompletionConfig: models.JSONB{"url": server.URL, "method": "POST"},
+		Graph: models.JSONB{
+			"version":    2,
+			"entry_node": "set",
+			"nodes": []any{
+				map[string]any{"id": "set", "type": "set_variable", "config": map[string]any{
+					"set": map[string]any{"answer": "42"},
+				}},
+			},
+			"edges": []any{},
+		},
+	}
+	require.NoError(t, app.DB.Create(flow).Error)
+
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "start", "", nil))
+
+	select {
+	case p := <-got:
+		assert.Equal(t, "hooked-flow", p.FlowName)
+		assert.Equal(t, session.PhoneNumber, p.PhoneNumber)
+		assert.Equal(t, "42", p.SessionData["answer"], "captured variables must reach the webhook")
+	case <-time.After(5 * time.Second):
+		t.Fatal("on-complete webhook never fired")
+	}
+}
+
+// newLocationPromptFlow builds a one-node prompt graph that expects a
+// shared WhatsApp location rather than free text.
+func newLocationPromptFlow(t *testing.T, app *App, org *models.Organization, account *models.WhatsAppAccount) *models.ChatbotFlow {
+	t.Helper()
+	flow := &models.ChatbotFlow{
+		BaseModel:       models.BaseModel{ID: uuid.New()},
+		OrganizationID:  org.ID,
+		WhatsAppAccount: account.Name,
+		Name:            "location-flow",
+		IsEnabled:       true,
+		Graph: models.JSONB{
+			"version":    2,
+			"entry_node": "p1",
+			"nodes": []any{
+				map[string]any{"id": "p1", "type": "prompt", "label": "ask", "config": map[string]any{
+					"body":       "Share your location",
+					"store_as":   "location",
+					"input_type": "location",
+				}},
+				map[string]any{"id": "e1", "type": "end", "label": "done"},
+			},
+			"edges": []any{
+				map[string]any{"from": "p1", "to": "e1", "condition": "default"},
+			},
+		},
+	}
+	require.NoError(t, app.DB.Create(flow).Error)
+	return flow
+}
+
+// A location prompt stores the shared coordinates as a nested map (so
+// {{location.latitude}} interpolates) plus the flattened _lat/_lng keys
+// the v1 engine wrote.
+func TestRunChatGraph_LocationPrompt_StoresNestedPayload(t *testing.T) {
+	app, org, account, contact, session := newGraphTestFixtures(t)
+	flow := newLocationPromptFlow(t, app, org, account)
+
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "start", "", nil))
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+	require.Equal(t, "p1", session.CurrentStep)
+
+	payload := `{"latitude":19.07,"longitude":72.87,"name":"Home","address":"Mumbai"}`
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, payload, "", nil))
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+
+	assert.Equal(t, models.SessionStatusCompleted, session.Status)
+	nested, ok := session.SessionData["location"].(map[string]any)
+	require.True(t, ok, "location should be stored as a nested map, got %T", session.SessionData["location"])
+	assert.EqualValues(t, 19.07, nested["latitude"])
+	assert.EqualValues(t, 19.07, session.SessionData["location_lat"])
+	assert.EqualValues(t, 72.87, session.SessionData["location_lng"])
+	assert.Equal(t, "Home", session.SessionData["location_name"])
+	assert.Equal(t, "Mumbai", session.SessionData["location_address"])
+}
+
+// Plain text at a location prompt is invalid input: re-prompt, don't store.
+func TestRunChatGraph_LocationPrompt_RejectsText(t *testing.T) {
+	app, org, account, contact, session := newGraphTestFixtures(t)
+	flow := newLocationPromptFlow(t, app, org, account)
+
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "start", "", nil))
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "near the station", "", nil))
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+
+	assert.Equal(t, "p1", session.CurrentStep, "should stay at the location prompt")
+	assert.Equal(t, models.SessionStatusActive, session.Status)
+	assert.Equal(t, 1, session.StepRetries)
+	assert.Nil(t, session.SessionData["location"])
 }
 
 // newWhatsAppFlowFlow builds a one-node WA Flow graph that advances to
@@ -554,6 +730,73 @@ func newAPICallFlow(t *testing.T, app *App, org *models.Organization, account *m
 	}
 	require.NoError(t, app.DB.Create(flow).Error)
 	return flow
+}
+
+// Node configs may reference the contact / organization / account
+// namespaces ({{contact.phone_number}} & co), not just captured session
+// variables. Legacy flows lean on this in API URLs and message bodies.
+func TestRunChatGraph_RendersContactAndOrgNamespaces(t *testing.T) {
+	gotQuery := make(chan map[string]string, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// RawQuery, not Query(): the contact's leading "+" would decode
+		// to a space and hide whether interpolation actually happened.
+		gotQuery <- map[string]string{"raw": r.URL.RawQuery}
+
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
+	}))
+	defer server.Close()
+
+	app, org, account, contact, session := newGraphTestFixtures(t)
+	flow := &models.ChatbotFlow{
+		BaseModel:       models.BaseModel{ID: uuid.New()},
+		OrganizationID:  org.ID,
+		WhatsAppAccount: account.Name,
+		Name:            "ctx-namespaces",
+		IsEnabled:       true,
+		Graph: models.JSONB{
+			"version":    2,
+			"entry_node": "api",
+			"nodes": []any{
+				map[string]any{"id": "api", "type": "api_call", "label": "fetch", "config": map[string]any{
+					"url":    server.URL + "/u?phone={{contact.phone_number}}&org={{organization.id}}",
+					"method": "GET",
+				}},
+				map[string]any{"id": "msg", "type": "message", "config": map[string]any{
+					"message": "Calling {{contact.phone_number}} for {{organization.name}}",
+				}},
+				map[string]any{"id": "end", "type": "end"},
+			},
+			"edges": []any{
+				map[string]any{"from": "api", "to": "msg", "condition": "http:2xx"},
+				map[string]any{"from": "msg", "to": "end", "condition": "default"},
+			},
+		},
+	}
+	require.NoError(t, app.DB.Create(flow).Error)
+
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "start", "", nil))
+
+	var q map[string]string
+	select {
+	case q = <-gotQuery:
+	case <-time.After(5 * time.Second):
+		require.NoError(t, app.DB.First(session, session.ID).Error)
+		t.Fatalf("api_call never reached the test server; session path: %+v", session.SessionData["__path__"])
+	}
+	assert.Contains(t, q["raw"], "phone="+contact.PhoneNumber, "{{contact.phone_number}} must resolve in API URLs")
+	assert.Contains(t, q["raw"], "org="+org.ID.String(), "{{organization.id}} must resolve in API URLs")
+
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+	var msgs []models.ChatbotSessionMessage
+	require.NoError(t, app.DB.Where("session_id = ? AND direction = ?", session.ID, models.DirectionOutgoing).Find(&msgs).Error)
+	sent := false
+	for _, m := range msgs {
+		if m.Message == "Calling "+contact.PhoneNumber+" for "+org.Name {
+			sent = true
+		}
+	}
+	assert.True(t, sent, "contact/organization namespaces must resolve in message bodies, got %+v", msgs)
 }
 
 // TestRunChatGraph_APICall_MessageTemplateSendsAfter2xx verifies the
@@ -1413,4 +1656,146 @@ func TestRunChatGraph_Prompt_NoRegexAcceptsAnything(t *testing.T) {
 	require.NoError(t, app.DB.First(session, session.ID).Error)
 	assert.Equal(t, models.SessionStatusCompleted, session.Status)
 	assert.Equal(t, "literally anything", session.SessionData["email"])
+}
+
+// TestRunChatGraph_ButtonsEscapeAfterMaxRetries covers the loop that stranded
+// real contacts in production: a buttons node re-sent itself on every typed
+// reply, forever, because only a button click could advance it. Someone who
+// answers in words — which is what a person with a problem does — could never
+// get out. Retries are now bounded and emit "max_retries" so the graph can
+// route them to a human.
+func TestRunChatGraph_ButtonsEscapeAfterMaxRetries(t *testing.T) {
+	app, org, account, contact, session := newGraphTestFixtures(t)
+
+	flow := &models.ChatbotFlow{
+		BaseModel:       models.BaseModel{ID: uuid.New()},
+		OrganizationID:  org.ID,
+		WhatsAppAccount: account.Name,
+		Name:            "buttons-escape",
+		IsEnabled:       true,
+		Graph: models.JSONB{
+			"version":    2,
+			"entry_node": "b1",
+			"nodes": []any{
+				map[string]any{
+					"id": "b1", "type": "buttons", "label": "choose",
+					"config": map[string]any{
+						"body":        "Pick one",
+						"max_retries": 2,
+						"buttons":     []any{map[string]any{"id": "opt_a", "title": "A"}},
+					},
+				},
+				map[string]any{"id": "human", "type": "end", "label": "handoff"},
+			},
+			"edges": []any{
+				map[string]any{"from": "b1", "to": "human", "condition": "max_retries"},
+			},
+		},
+	}
+	require.NoError(t, app.DB.Create(flow).Error)
+
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "start", "", nil))
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+	require.Equal(t, "b1", session.CurrentStep)
+
+	// First typed reply: nudge, still waiting.
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "i want help", "", nil))
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+	assert.Equal(t, "b1", session.CurrentStep, "first retry should stay put")
+	assert.Equal(t, models.SessionStatusActive, session.Status)
+
+	// Second hits max_retries and takes the escape edge.
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "i said help", "", nil))
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+	assert.NotEqual(t, models.SessionStatusActive, session.Status,
+		"should have left the buttons node instead of looping")
+}
+
+// Without a "max_retries" edge the runner finds no target and completes the
+// flow. That is the important half: an unmodified graph still lets the user
+// out, so the fix does not depend on every existing flow being re-authored.
+func TestRunChatGraph_ButtonsEscapeWithoutEscapeEdge(t *testing.T) {
+	app, org, account, contact, session := newGraphTestFixtures(t)
+
+	flow := &models.ChatbotFlow{
+		BaseModel:       models.BaseModel{ID: uuid.New()},
+		OrganizationID:  org.ID,
+		WhatsAppAccount: account.Name,
+		Name:            "buttons-no-escape-edge",
+		IsEnabled:       true,
+		Graph: models.JSONB{
+			"version":    2,
+			"entry_node": "b1",
+			"nodes": []any{
+				map[string]any{
+					"id": "b1", "type": "buttons", "label": "choose",
+					"config": map[string]any{
+						"body":        "Pick one",
+						"max_retries": 1,
+						"buttons":     []any{map[string]any{"id": "opt_a", "title": "A"}},
+					},
+				},
+			},
+			"edges": []any{},
+		},
+	}
+	require.NoError(t, app.DB.Create(flow).Error)
+
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "start", "", nil))
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "words not buttons", "", nil))
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+	assert.NotEqual(t, models.SessionStatusActive, session.Status,
+		"flow should terminate rather than re-prompt forever")
+}
+
+// A buttons node reached *during* a run must still send its buttons, even
+// though ctx.userInput holds the text that was meant for the node upstream.
+// The resumedAt guard is what keeps that text from being read as a failed
+// button choice — get this wrong and every flow that puts a prompt before
+// buttons opens with "Sorry, I didn't catch that".
+func TestRunChatGraph_ButtonsAfterPromptSendsNormally(t *testing.T) {
+	app, org, account, contact, session := newGraphTestFixtures(t)
+
+	flow := &models.ChatbotFlow{
+		BaseModel:       models.BaseModel{ID: uuid.New()},
+		OrganizationID:  org.ID,
+		WhatsAppAccount: account.Name,
+		Name:            "prompt-then-buttons",
+		IsEnabled:       true,
+		Graph: models.JSONB{
+			"version":    2,
+			"entry_node": "p1",
+			"nodes": []any{
+				map[string]any{
+					"id": "p1", "type": "prompt", "label": "ask name",
+					"config": map[string]any{"body": "Your name?", "store_as": "name"},
+				},
+				map[string]any{
+					"id": "b1", "type": "buttons", "label": "choose",
+					"config": map[string]any{
+						"body":    "Pick one",
+						"buttons": []any{map[string]any{"id": "opt_a", "title": "A"}},
+					},
+				},
+			},
+			"edges": []any{
+				map[string]any{"from": "p1", "to": "b1", "condition": "default"},
+			},
+		},
+	}
+	require.NoError(t, app.DB.Create(flow).Error)
+
+	// Trigger → p1 asks.
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "hi", "", nil))
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+	require.Equal(t, "p1", session.CurrentStep)
+
+	// Answer the prompt: p1 consumes it, traversal reaches b1, which must
+	// send its buttons and wait — not treat "Gabriel" as a bad button.
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "Gabriel", "", nil))
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+	assert.Equal(t, "b1", session.CurrentStep)
+	assert.Equal(t, models.SessionStatusActive, session.Status)
+	assert.Equal(t, "Gabriel", session.SessionData["name"], "prompt should have stored the answer")
+	assert.Equal(t, 0, session.StepRetries, "arriving at buttons is not a failed attempt")
 }
