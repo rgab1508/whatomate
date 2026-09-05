@@ -15,6 +15,7 @@ import (
 	"github.com/expr-lang/expr"
 	"github.com/google/uuid"
 	"github.com/shridarpatil/whatomate/internal/models"
+	"unicode"
 )
 
 // maxChatGraphIterations bounds non-blocking node chains within a single
@@ -163,6 +164,20 @@ func (a *App) runChatGraph(
 	} else if a.cancelChatFlow(ctx, flow) {
 		// Mid-flow cancel keyword ("stop", "cancel", ...) ends the run here.
 		return nil
+	} else if a.restartChatFlow(ctx, flow, graph) {
+		// The flow's own trigger keyword ("hi") mid-flow means start over.
+		a.logFlowEvent(session.ID, flow.ID, graph.EntryNode, models.FlowLogFlowStarted,
+			flow.Name, map[string]any{"restarted": true})
+		if msg := ctx.render(flow.InitialMessage); msg != "" {
+			if err := a.sendAndSaveTextMessage(account, contact, msg); err != nil {
+				a.Log.Error("Failed to send flow initial message on restart",
+					"error", err, "flow", flow.ID, "contact", contact.PhoneNumber)
+			} else {
+				a.logSessionMessage(session.ID, models.DirectionOutgoing, msg, "flow_start")
+			}
+		}
+		ctx.userInput = ""
+		ctx.buttonID = ""
 	}
 	// Whatever node we resume at owns this inbound message.
 	ctx.resumedAt = session.CurrentStep
@@ -1124,6 +1139,52 @@ func (a *App) execChatEnd(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, error)
 //
 // Only applies to a resumed run — the trigger message that started the
 // flow is never treated as a cancel.
+// restartChatFlow reports whether this inbound is the flow's own trigger
+// keyword arriving mid-flow, and if so rewinds the session to the entry node.
+//
+// Needed because the active-session branch runs before matchFlowTrigger: while
+// a session is open the trigger is never consulted, so a contact parked on a
+// menu who types "hi" would be answered with nothing at all. Until buttons
+// nodes went silent this was masked — the menu re-sent itself on any text, so
+// "hi" appeared to work when it was really the loop.
+//
+// Matching is by whole word, deliberately unlike matchFlowTrigger's substring
+// test: with "hi" as a keyword, a substring match would restart the flow on
+// "Chinese" or "white shirt" — answers a contact could plausibly give inside
+// the very flow being restarted.
+func (a *App) restartChatFlow(ctx *chatNodeCtx, flow *models.ChatbotFlow, graph *ChatGraph) bool {
+	if ctx.userInput == "" || len(flow.TriggerKeywords) == 0 {
+		return false
+	}
+	if !matchesWholeWord(ctx.userInput, flow.TriggerKeywords) {
+		return false
+	}
+	ctx.session.CurrentStep = graph.EntryNode
+	ctx.session.StepRetries = 0
+	return true
+}
+
+// matchesWholeWord reports whether any keyword appears in text as a complete
+// word, case-insensitively. Splitting on non-alphanumerics means "Hi!" and
+// "hi there" match "hi" while "Chinese" does not.
+func matchesWholeWord(text string, keywords models.StringArray) bool {
+	words := strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	for _, kw := range keywords {
+		kw = strings.ToLower(strings.TrimSpace(kw))
+		if kw == "" {
+			continue
+		}
+		for _, w := range words {
+			if w == kw {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (a *App) cancelChatFlow(ctx *chatNodeCtx, flow *models.ChatbotFlow) bool {
 	if ctx.userInput == "" || len(flow.CancelKeywords) == 0 {
 		return false

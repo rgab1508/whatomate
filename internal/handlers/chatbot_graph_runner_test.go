@@ -1856,3 +1856,78 @@ func TestRunChatGraph_ButtonsAfterPromptSendsNormally(t *testing.T) {
 	assert.Equal(t, "Gabriel", session.SessionData["name"], "prompt should have stored the answer")
 	assert.Equal(t, 0, session.StepRetries, "arriving at buttons is not a failed attempt")
 }
+
+// A contact parked on a menu who types the flow's own trigger keyword should
+// get the menu again — "hi" means start over. The active-session branch runs
+// before matchFlowTrigger, so without an explicit restart the keyword is never
+// consulted and (now that buttons nodes are silent) nothing at all happens.
+func TestRunChatGraph_TriggerKeywordRestartsMidFlow(t *testing.T) {
+	app, org, account, contact, session := newGraphTestFixtures(t)
+
+	flow := &models.ChatbotFlow{
+		BaseModel:       models.BaseModel{ID: uuid.New()},
+		OrganizationID:  org.ID,
+		WhatsAppAccount: account.Name,
+		Name:            "restartable",
+		IsEnabled:       true,
+		TriggerKeywords: models.StringArray{"Hi", "Hello"},
+		Graph: models.JSONB{
+			"version":    2,
+			"entry_node": "b1",
+			"nodes": []any{
+				map[string]any{
+					"id": "b1", "type": "buttons", "label": "menu",
+					"config": map[string]any{
+						"body":    "Pick one",
+						"buttons": []any{map[string]any{"id": "opt_a", "title": "A"}},
+					},
+				},
+			},
+			"edges": []any{},
+		},
+	}
+	require.NoError(t, app.DB.Create(flow).Error)
+
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "hi", "", nil))
+	sent := func() int64 {
+		var n int64
+		require.NoError(t, app.DB.Model(&models.ChatbotSessionMessage{}).
+			Where("session_id = ? AND direction = ?", session.ID, models.DirectionOutgoing).
+			Count(&n).Error)
+		return n
+	}
+	afterMenu := sent()
+
+	// Small talk: silent.
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "How are you", "", nil))
+	assert.Equal(t, afterMenu, sent(), "small talk must not be answered")
+
+	// The trigger keyword: menu again.
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "Hi", "", nil))
+	assert.Greater(t, sent(), afterMenu, "the trigger keyword should re-send the menu")
+
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+	assert.Equal(t, "b1", session.CurrentStep)
+	assert.Equal(t, models.SessionStatusActive, session.Status)
+}
+
+// The restart match is by whole word. matchFlowTrigger uses a substring test,
+// which is tolerable when starting a flow but not when interrupting one: with
+// "hi" as a keyword it would restart on "Chinese" or "white", both plausible
+// answers inside the flow being restarted.
+func TestMatchesWholeWord(t *testing.T) {
+	kws := models.StringArray{"Hi", "Hello"}
+
+	for _, text := range []string{"Hi", "hi", "HI!", "hi there", "oh, hello?"} {
+		assert.True(t, matchesWholeWord(text, kws), "%q should match", text)
+	}
+	for _, text := range []string{
+		"Chinese silk", // contains "hi"
+		"white shirt",  // contains "hi"
+		"this one",     // contains "hi"
+		"i want help with an issue",
+		"",
+	} {
+		assert.False(t, matchesWholeWord(text, kws), "%q should not match", text)
+	}
+}
