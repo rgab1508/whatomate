@@ -2004,3 +2004,74 @@ func TestBoolFromConfig(t *testing.T) {
 	assert.False(t, boolFromConfig(map[string]any{"k": "no"}, "k"))
 	assert.False(t, boolFromConfig(map[string]any{}, "k"))
 }
+
+// A prompt that follows another prompt must ask its own question.
+//
+// This stranded a real signup: the bot asked for a name, the contact sent
+// "Clement", and the next node — "please share your location" — executed
+// without sending anything. The session sat on Location waiting for a reply
+// to a question nobody had asked, and the flow log said step_sent because it
+// records node execution, not delivery.
+func TestRunChatGraph_PromptAfterPromptAsksItsQuestion(t *testing.T) {
+	app, org, account, contact, session := newGraphTestFixtures(t)
+
+	flow := &models.ChatbotFlow{
+		BaseModel:       models.BaseModel{ID: uuid.New()},
+		OrganizationID:  org.ID,
+		WhatsAppAccount: account.Name,
+		Name:            "onboarding",
+		IsEnabled:       true,
+		Graph: models.JSONB{
+			"version":    2,
+			"entry_node": "name",
+			"nodes": []any{
+				map[string]any{
+					"id": "name", "type": "prompt", "label": "name",
+					"config": map[string]any{
+						"body": "Please enter your name?", "store_as": "cxName",
+					},
+				},
+				map[string]any{
+					"id": "loc", "type": "prompt", "label": "location",
+					"config": map[string]any{
+						"body":     "Nice to meet you {{cxName}}! Please share your location.",
+						"store_as": "location",
+					},
+				},
+			},
+			"edges": []any{
+				map[string]any{"from": "name", "to": "loc", "condition": "default"},
+			},
+		},
+	}
+	require.NoError(t, app.DB.Create(flow).Error)
+
+	outgoing := func() []models.ChatbotSessionMessage {
+		var msgs []models.ChatbotSessionMessage
+		require.NoError(t, app.DB.Where("session_id = ? AND direction = ?",
+			session.ID, models.DirectionOutgoing).Order("created_at").Find(&msgs).Error)
+		return msgs
+	}
+
+	// Trigger: the name question goes out.
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "hi", "", nil))
+	require.Len(t, outgoing(), 1)
+	assert.Contains(t, outgoing()[0].Message, "enter your name")
+
+	// Answer it. The location question must actually be sent, not just logged.
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "Clement", "", nil))
+	msgs := outgoing()
+	require.Len(t, msgs, 2, "the location prompt must reach the contact")
+	assert.Contains(t, msgs[1].Message, "share your location")
+	// And it renders what the previous node stored.
+	assert.Contains(t, msgs[1].Message, "Clement")
+
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+	assert.Equal(t, "loc", session.CurrentStep)
+	assert.Equal(t, "Clement", session.SessionData["cxName"])
+
+	// Answering the second prompt still advances normally.
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "Bhandup West", "", nil))
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+	assert.Equal(t, "Bhandup West", session.SessionData["location"])
+}

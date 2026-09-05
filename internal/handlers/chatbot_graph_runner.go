@@ -471,8 +471,17 @@ func (a *App) handleChatButtonsUnmatched(node *ChatNode, ctx *chatNodeCtx) (node
 func (a *App) execChatPrompt(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, error) {
 	body := stringFromConfig(node.Config, "body", "message", "text")
 
-	// No input yet → send prompt and wait.
-	if !ctx.consumed && ctx.userInput == "" {
+	// Ask the question when this node has just been reached, rather than
+	// resumed at. Two ways that happens: no inbound at all, or the inbound
+	// belonged to an upstream node that already consumed it.
+	//
+	// That second case is why this checks resumedAt and not just ctx.consumed.
+	// A prompt following another prompt — "what is your name?" then "share
+	// your location" — arrives with consumed already true, and the old guard
+	// yielded silently on it. The contact was parked on a question nobody had
+	// asked them, and the flow log said step_sent because it records node
+	// execution, not delivery.
+	if ctx.resumedAt != node.ID || (!ctx.consumed && ctx.userInput == "") {
 		if body == "" {
 			return nodeOutcome{}, fmt.Errorf("prompt node %q has no body configured", node.ID)
 		}
@@ -485,8 +494,7 @@ func (a *App) execChatPrompt(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, err
 	}
 
 	if ctx.consumed {
-		// Input was already consumed by an earlier blocking node in this
-		// run — defensive guard. Treat as fresh entry.
+		// Same node twice in one run. Defensive; wait for the next inbound.
 		return nodeOutcome{yield: true}, nil
 	}
 
