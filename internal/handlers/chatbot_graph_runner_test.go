@@ -177,7 +177,9 @@ func TestRunChatGraph_ButtonsStoreAs(t *testing.T) {
 }
 
 // TestRunChatGraph_ButtonsRePromptOnText verifies that a text reply (no
-// buttonID) at a buttons node re-sends the prompt instead of advancing.
+// buttonID) at a buttons node waits rather than advancing — and, by default,
+// waits silently. A menu that answers back every time someone types is the
+// bug this replaced.
 func TestRunChatGraph_ButtonsRePromptOnText(t *testing.T) {
 	app, org, account, contact, session := newGraphTestFixtures(t)
 
@@ -213,10 +215,8 @@ func TestRunChatGraph_ButtonsRePromptOnText(t *testing.T) {
 	assert.Equal(t, "b1", session.CurrentStep)
 	assert.Equal(t, models.SessionStatusActive, session.Status)
 
-	// Second inbound: text instead of button click. Re-prompts (stays at b1,
-	// status still active, path has another b1 entry). This is retry 1 of the
-	// default 3 — see TestRunChatGraph_ButtonsEscapeAfterMaxRetries for what
-	// happens when they keep typing.
+	// Second inbound: text instead of button click. Stays at b1, still
+	// active, and — with no invalid_message configured — sends nothing.
 	require.NoError(t, app.runChatGraph(account, contact, session, flow, "huh?", "", nil))
 	require.NoError(t, app.DB.First(session, session.ID).Error)
 	assert.Equal(t, "b1", session.CurrentStep)
@@ -1680,9 +1680,10 @@ func TestRunChatGraph_ButtonsEscapeAfterMaxRetries(t *testing.T) {
 				map[string]any{
 					"id": "b1", "type": "buttons", "label": "choose",
 					"config": map[string]any{
-						"body":        "Pick one",
-						"max_retries": 2,
-						"buttons":     []any{map[string]any{"id": "opt_a", "title": "A"}},
+						"body":            "Pick one",
+						"max_retries":     2,
+						"invalid_message": "Please tap an option.",
+						"buttons":         []any{map[string]any{"id": "opt_a", "title": "A"}},
 					},
 				},
 				map[string]any{"id": "human", "type": "end", "label": "handoff"},
@@ -1711,9 +1712,10 @@ func TestRunChatGraph_ButtonsEscapeAfterMaxRetries(t *testing.T) {
 		"should have left the buttons node instead of looping")
 }
 
-// Without a "max_retries" edge the runner finds no target and completes the
-// flow. That is the important half: an unmodified graph still lets the user
-// out, so the fix does not depend on every existing flow being re-authored.
+// With no "max_retries" edge the node must stay put rather than fall through
+// and complete the flow — completing sends the flow's completion message, and
+// firing "Thank you! We have all the information we need." at someone who
+// never finished is worse than saying nothing.
 func TestRunChatGraph_ButtonsEscapeWithoutEscapeEdge(t *testing.T) {
 	app, org, account, contact, session := newGraphTestFixtures(t)
 
@@ -1730,9 +1732,10 @@ func TestRunChatGraph_ButtonsEscapeWithoutEscapeEdge(t *testing.T) {
 				map[string]any{
 					"id": "b1", "type": "buttons", "label": "choose",
 					"config": map[string]any{
-						"body":        "Pick one",
-						"max_retries": 1,
-						"buttons":     []any{map[string]any{"id": "opt_a", "title": "A"}},
+						"body":            "Pick one",
+						"max_retries":     1,
+						"invalid_message": "Please tap an option.",
+						"buttons":         []any{map[string]any{"id": "opt_a", "title": "A"}},
 					},
 				},
 			},
@@ -1744,8 +1747,62 @@ func TestRunChatGraph_ButtonsEscapeWithoutEscapeEdge(t *testing.T) {
 	require.NoError(t, app.runChatGraph(account, contact, session, flow, "start", "", nil))
 	require.NoError(t, app.runChatGraph(account, contact, session, flow, "words not buttons", "", nil))
 	require.NoError(t, app.DB.First(session, session.ID).Error)
-	assert.NotEqual(t, models.SessionStatusActive, session.Status,
-		"flow should terminate rather than re-prompt forever")
+	assert.Equal(t, "b1", session.CurrentStep, "should stay on the menu")
+	assert.Equal(t, models.SessionStatusActive, session.Status,
+		"must not complete the flow and fire its completion message")
+}
+
+// The default: a buttons node with no invalid_message answers typed text with
+// nothing at all. "How are you" is someone talking to a person, not someone
+// failing to press a button, and the message is already in the inbox for an
+// agent. Asserted on the stored conversation, since "sent nothing" is the
+// whole point.
+func TestRunChatGraph_ButtonsSilentOnTextByDefault(t *testing.T) {
+	app, org, account, contact, session := newGraphTestFixtures(t)
+
+	flow := &models.ChatbotFlow{
+		BaseModel:       models.BaseModel{ID: uuid.New()},
+		OrganizationID:  org.ID,
+		WhatsAppAccount: account.Name,
+		Name:            "buttons-silent",
+		IsEnabled:       true,
+		Graph: models.JSONB{
+			"version":    2,
+			"entry_node": "b1",
+			"nodes": []any{
+				map[string]any{
+					"id": "b1", "type": "buttons", "label": "choose",
+					"config": map[string]any{
+						"body":    "Pick one",
+						"buttons": []any{map[string]any{"id": "opt_a", "title": "A"}},
+					},
+				},
+			},
+			"edges": []any{},
+		},
+	}
+	require.NoError(t, app.DB.Create(flow).Error)
+
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "start", "", nil))
+	var afterMenu int64
+	require.NoError(t, app.DB.Model(&models.ChatbotSessionMessage{}).
+		Where("session_id = ? AND direction = ?", session.ID, models.DirectionOutgoing).
+		Count(&afterMenu).Error)
+
+	// Three typed replies in a row must add nothing to the conversation.
+	for _, text := range []string{"How are you", "hello?", "anyone there"} {
+		require.NoError(t, app.runChatGraph(account, contact, session, flow, text, "", nil))
+	}
+
+	var afterTyping int64
+	require.NoError(t, app.DB.Model(&models.ChatbotSessionMessage{}).
+		Where("session_id = ? AND direction = ?", session.ID, models.DirectionOutgoing).
+		Count(&afterTyping).Error)
+	assert.Equal(t, afterMenu, afterTyping, "typed replies must not be answered")
+
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+	assert.Equal(t, "b1", session.CurrentStep, "still waiting on the menu")
+	assert.Equal(t, models.SessionStatusActive, session.Status)
 }
 
 // A buttons node reached *during* a run must still send its buttons, even

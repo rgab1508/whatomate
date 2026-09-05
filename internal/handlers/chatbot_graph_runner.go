@@ -39,6 +39,11 @@ type chatNodeCtx struct {
 	flowResponseData map[string]any // form fields from a WhatsApp Flow submission
 	consumed         bool
 
+	// The running graph, so a node can ask whether an outcome has an edge
+	// before emitting it — emitting one with nowhere to go completes the
+	// flow, which sends the completion message.
+	graph *ChatGraph
+
 	// Node the run resumed at, captured before traversal begins. Only that
 	// node may treat this inbound as its own input — nodes reached later in
 	// the same run were not waiting for it. Without this, a buttons node
@@ -161,6 +166,7 @@ func (a *App) runChatGraph(
 	}
 	// Whatever node we resume at owns this inbound message.
 	ctx.resumedAt = session.CurrentStep
+	ctx.graph = graph
 
 	for range maxChatGraphIterations {
 		node := graph.Node(session.CurrentStep)
@@ -228,6 +234,7 @@ func (a *App) runChatGraph(
 			}
 			flow = newFlow
 			graph = newGraph
+			ctx.graph = newGraph
 			session.CurrentStep = newGraph.EntryNode
 			continue
 		}
@@ -364,37 +371,51 @@ func (a *App) execChatButtons(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, er
 
 // handleChatButtonsUnmatched deals with free text sent to a buttons node.
 //
-// Mirrors handleChatPromptInvalid, with one difference: the nudge is sent as
-// the body of the buttons themselves rather than a separate text message. The
-// user still has to choose, and WhatsApp scrolls interactive messages away, so
-// a bare "please tap a button" would leave nothing to tap.
+// Default is silence: stay on the node and send nothing. A buttons node is a
+// menu, and someone typing at a menu is usually talking to a person, not
+// failing to use the UI — "How are you" wants an agent, not a nudge to press
+// a button. The message is already in the shared inbox for a human to pick up,
+// and the session times out on its own.
 //
-// After max_retries the node emits "max_retries" so the graph can route to a
-// human handoff. If no such edge is authored ResolveEdge returns "", the
-// runner treats the node as terminal and completes the flow — so even an
-// unmodified graph lets the user out instead of looping.
+// The previous behaviour re-sent the buttons on every typed reply, forever.
+// That is the bug this replaces; answering with a nudge instead would just be
+// a politer version of the same interruption.
+//
+// A nudge is opt-in per node, via "invalid_message". When set, it is sent as
+// the buttons' body (WhatsApp scrolls interactive messages away, so a bare
+// "tap a button" would leave nothing to tap) and bounded by max_retries,
+// after which the node emits "max_retries" for the graph to route to a human.
+// Note that outcome only fires when an edge exists for it — otherwise the
+// runner would complete the flow, and completing sends the flow's completion
+// message, which is another thing the contact did not ask for.
 //
 // Config (all optional):
 //
 //	{
-//	  "invalid_message": "...",  // body used on a retry; default below
+//	  "invalid_message": "...",  // unset (default) = stay silent
 //	  "max_retries": 3
 //	}
 func (a *App) handleChatButtonsUnmatched(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, error) {
-	ctx.session.StepRetries++
+	body := stringFromConfig(node.Config, "invalid_message")
+	if body == "" {
+		// Silent: no send, no retry count, no advance. Wait for a button.
+		return nodeOutcome{yield: true}, nil
+	}
 
+	ctx.session.StepRetries++
 	maxRetries := intFromConfig(node.Config, "max_retries", 3)
 	if ctx.session.StepRetries >= maxRetries {
 		ctx.session.StepRetries = 0
-		return nodeOutcome{outcome: "max_retries"}, nil
+		// Only leave the node when the author wired an escape. Without one,
+		// falling through would complete the flow and fire its completion
+		// message at someone who never finished it.
+		if ctx.graph.ResolveEdge(node.ID, "max_retries") != "" {
+			return nodeOutcome{outcome: "max_retries"}, nil
+		}
+		return nodeOutcome{yield: true}, nil
 	}
 
-	body := stringFromConfig(node.Config, "invalid_message")
-	if body == "" {
-		body = "Sorry, I didn't catch that. Please tap one of the options below."
-	}
 	body = ctx.render(body)
-
 	buttons := buttonsFromConfig(node.Config)
 	if len(buttons) == 0 {
 		return nodeOutcome{}, fmt.Errorf("buttons node %q has no buttons configured", node.ID)
