@@ -1076,6 +1076,23 @@ func (a *App) execChatWhatsAppFlow(node *ChatNode, ctx *chatNodeCtx) (nodeOutcom
 		return nodeOutcome{outcome: "default"}, nil
 	}
 
+	// await_only: something else already sent the form — wait for the reply
+	// without sending anything.
+	//
+	// Needed when the form carries data the graph cannot know. Gharit's
+	// schedule-pickup form is built by their own backend so it can inject the
+	// contact's saved addresses and the frequency options; the graph fired
+	// that as a non-blocking api_call and walked straight on to the next node,
+	// so "Thank you for booking" arrived before the customer had opened the
+	// form, let alone filled it in.
+	//
+	// Yields on every inbound until a flow submission arrives, so typing while
+	// the form is open is ignored rather than mistaken for completion — the
+	// same choice buttons nodes make.
+	if boolFromConfig(node.Config, "await_only") {
+		return nodeOutcome{yield: true}, nil
+	}
+
 	flowID := stringFromConfig(node.Config, "flow_id")
 	if flowID == "" {
 		a.Log.Warn("whatsapp_flow node missing flow_id",
@@ -1377,6 +1394,19 @@ func stringFromConfig(cfg map[string]any, keys ...string) string {
 // intFromConfig returns an int value from config at the given key, falling
 // back to def. JSON numbers decode as float64 in map[string]any, so accept
 // both float64 and int.
+// boolFromConfig reads a boolean node-config value, accepting the JSON string
+// forms too — the flow editor round-trips some fields as text.
+func boolFromConfig(cfg map[string]any, key string) bool {
+	switch v := cfg[key].(type) {
+	case bool:
+		return v
+	case string:
+		return strings.EqualFold(v, "true")
+	default:
+		return false
+	}
+}
+
 func intFromConfig(cfg map[string]any, key string, def int) int {
 	switch v := cfg[key].(type) {
 	case float64:

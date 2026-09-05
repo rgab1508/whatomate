@@ -1931,3 +1931,76 @@ func TestMatchesWholeWord(t *testing.T) {
 		assert.False(t, matchesWholeWord(text, kws), "%q should not match", text)
 	}
 }
+
+// A whatsapp_flow node in await_only mode waits for the submission without
+// sending anything. This is what stops "Thank you for booking" going out the
+// moment the form is dispatched: the form is sent by an upstream api_call
+// (the backend builds it, because it carries the contact's saved addresses),
+// and the graph must park until the customer actually submits.
+func TestRunChatGraph_WhatsAppFlowAwaitOnly(t *testing.T) {
+	app, org, account, contact, session := newGraphTestFixtures(t)
+
+	flow := &models.ChatbotFlow{
+		BaseModel:       models.BaseModel{ID: uuid.New()},
+		OrganizationID:  org.ID,
+		WhatsAppAccount: account.Name,
+		Name:            "await-flow",
+		IsEnabled:       true,
+		Graph: models.JSONB{
+			"version":    2,
+			"entry_node": "wait",
+			"nodes": []any{
+				map[string]any{
+					"id": "wait", "type": "whatsapp_flow", "label": "await form",
+					"config": map[string]any{"await_only": true},
+				},
+				map[string]any{
+					"id": "thanks", "type": "message", "label": "thanks",
+					"config": map[string]any{"message": "Thank you for booking!"},
+				},
+			},
+			"edges": []any{
+				map[string]any{"from": "wait", "to": "thanks", "condition": "default"},
+			},
+		},
+	}
+	require.NoError(t, app.DB.Create(flow).Error)
+
+	sent := func() int64 {
+		var n int64
+		require.NoError(t, app.DB.Model(&models.ChatbotSessionMessage{}).
+			Where("session_id = ? AND direction = ?", session.ID, models.DirectionOutgoing).
+			Count(&n).Error)
+		return n
+	}
+
+	// Entering the node must send nothing and park.
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "start", "", nil))
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+	assert.Equal(t, "wait", session.CurrentStep)
+	assert.Zero(t, sent(), "await_only must not send a form or a thank-you")
+
+	// Chatter while the form is open is ignored, not treated as completion.
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "is this working?", "", nil))
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+	assert.Equal(t, "wait", session.CurrentStep, "text must not complete the form")
+	assert.Zero(t, sent())
+
+	// The submission advances, and only now does the thank-you go out.
+	require.NoError(t, app.runChatGraph(account, contact, session, flow, "", "",
+		map[string]any{"slot": "morning", "address_id": "loc_1"}))
+	require.NoError(t, app.DB.First(session, session.ID).Error)
+	assert.Positive(t, sent(), "thank-you should follow the submission")
+	assert.Equal(t, "morning", session.SessionData["slot"], "form fields land in session data")
+	assert.Equal(t, "loc_1", session.SessionData["address_id"])
+}
+
+func TestBoolFromConfig(t *testing.T) {
+	assert.True(t, boolFromConfig(map[string]any{"k": true}, "k"))
+	// The flow editor round-trips some fields as text.
+	assert.True(t, boolFromConfig(map[string]any{"k": "true"}, "k"))
+	assert.True(t, boolFromConfig(map[string]any{"k": "TRUE"}, "k"))
+	assert.False(t, boolFromConfig(map[string]any{"k": false}, "k"))
+	assert.False(t, boolFromConfig(map[string]any{"k": "no"}, "k"))
+	assert.False(t, boolFromConfig(map[string]any{}, "k"))
+}
