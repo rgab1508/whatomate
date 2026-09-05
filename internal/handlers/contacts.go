@@ -153,7 +153,7 @@ func (a *App) ListContacts(r *fastglue.Request) error {
 		// Count unread messages
 		var unreadCount int64
 		a.DB.Model(&models.Message{}).
-			Where("contact_id = ? AND direction = ? AND status != ?", c.ID, models.DirectionIncoming, models.MessageStatusRead).
+			Where("contact_id = ? AND direction = ? AND read_by_agent_at IS NULL", c.ID, models.DirectionIncoming).
 			Count(&unreadCount)
 
 		tags := []string{}
@@ -462,15 +462,21 @@ func (a *App) MarkContactRead(r *fastglue.Request) error {
 	return r.SendEnvelope(map[string]any{"status": "ok"})
 }
 
-// markMessagesAsRead marks messages as read and sends read receipts
+// markMessagesAsRead stamps the contact's incoming messages as consumed by our
+// side (agent opened the chat, or the chatbot answered) and sends WhatsApp read
+// receipts for the ones not already stamped. Only read_by_agent_at is touched —
+// Status stays on the WhatsApp delivery lifecycle so the unread badge and the
+// blue-tick state can't overwrite each other. See issue #280.
 func (a *App) markMessagesAsRead(orgID uuid.UUID, contactID uuid.UUID, contact *models.Contact) {
 	var unreadMessages []models.Message
-	a.DB.Where("contact_id = ? AND direction = ? AND status != ?", contactID, models.DirectionIncoming, models.MessageStatusRead).
+	a.DB.Where("contact_id = ? AND direction = ? AND read_by_agent_at IS NULL", contactID, models.DirectionIncoming).
 		Find(&unreadMessages)
 
-	a.DB.Model(&models.Message{}).
-		Where("contact_id = ? AND direction = ?", contactID, models.DirectionIncoming).
-		Update("status", models.MessageStatusRead)
+	if len(unreadMessages) > 0 {
+		a.DB.Model(&models.Message{}).
+			Where("contact_id = ? AND direction = ? AND read_by_agent_at IS NULL", contactID, models.DirectionIncoming).
+			Update("read_by_agent_at", time.Now())
+	}
 
 	a.DB.Model(contact).Update("is_read", true)
 
@@ -1551,7 +1557,7 @@ func (a *App) buildContactResponse(contact *models.Contact, orgID uuid.UUID) Con
 	// Count unread messages
 	var unreadCount int64
 	a.DB.Model(&models.Message{}).
-		Where("contact_id = ? AND direction = ? AND status != ?", contact.ID, models.DirectionIncoming, models.MessageStatusRead).
+		Where("contact_id = ? AND direction = ? AND read_by_agent_at IS NULL", contact.ID, models.DirectionIncoming).
 		Count(&unreadCount)
 
 	tags := []string{}

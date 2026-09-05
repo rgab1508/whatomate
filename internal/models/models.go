@@ -396,11 +396,17 @@ type Message struct {
 	InteractiveData   JSONB         `gorm:"type:jsonb" json:"interactive_data"`
 	FlowResponse      JSONB         `gorm:"type:jsonb" json:"flow_response"`
 	Status            MessageStatus `gorm:"size:20;default:'pending'" json:"status"`
-	ErrorMessage      string        `gorm:"type:text" json:"error_message"`
-	IsReply           bool          `gorm:"default:false" json:"is_reply"`
-	ReplyToMessageID  *uuid.UUID    `gorm:"type:uuid" json:"reply_to_message_id,omitempty"`
-	SentByUserID      *uuid.UUID    `gorm:"type:uuid;index" json:"sent_by_user_id,omitempty"` // User who sent outgoing message
-	Metadata          JSONB         `gorm:"type:jsonb;default:'{}'" json:"metadata"`
+	// ReadByAgentAt records when our side consumed an incoming message — an
+	// agent opened the chat, or the chatbot answered it. Distinct from Status,
+	// which is the WhatsApp delivery lifecycle of an *outgoing* message
+	// (sent/delivered/read by the customer). The contact-list unread badge
+	// counts incoming messages with ReadByAgentAt IS NULL; nil on outgoing.
+	ReadByAgentAt    *time.Time `json:"read_by_agent_at,omitempty"`
+	ErrorMessage     string     `gorm:"type:text" json:"error_message"`
+	IsReply          bool       `gorm:"default:false" json:"is_reply"`
+	ReplyToMessageID *uuid.UUID `gorm:"type:uuid" json:"reply_to_message_id,omitempty"`
+	SentByUserID     *uuid.UUID `gorm:"type:uuid;index" json:"sent_by_user_id,omitempty"` // User who sent outgoing message
+	Metadata         JSONB      `gorm:"type:jsonb;default:'{}'" json:"metadata"`
 
 	// Relations
 	Organization   *Organization `gorm:"foreignKey:OrganizationID" json:"organization,omitempty"`

@@ -215,6 +215,12 @@ func RunMigrationWithProgress(db *gorm.DB, adminCfg *config.DefaultAdminConfig) 
 		return err
 	}
 
+	// Backfill read_by_agent_at for incoming messages read before the column existed
+	if err := BackfillReadByAgentAt(silentDB); err != nil {
+		fmt.Printf("\n  \033[31m✗ Failed to backfill read_by_agent_at\033[0m\n\n")
+		return err
+	}
+
 	printProgress(currentStep, totalSteps)
 	fmt.Printf("\n  \033[32m✓ Migration completed\033[0m\n\n")
 
@@ -257,6 +263,8 @@ func getIndexes() []string {
 		`CREATE INDEX IF NOT EXISTS idx_bulk_campaigns_account ON bulk_message_campaigns(whats_app_account, status)`,
 		`CREATE INDEX IF NOT EXISTS idx_notification_rules_account ON notification_rules(whats_app_account, is_enabled)`,
 		`CREATE INDEX IF NOT EXISTS idx_messages_account ON messages(whats_app_account, created_at DESC)`,
+		// Unread badge: incoming messages our side hasn't consumed yet
+		`CREATE INDEX IF NOT EXISTS idx_messages_unread ON messages(contact_id) WHERE direction = 'incoming' AND read_by_agent_at IS NULL`,
 		`CREATE INDEX IF NOT EXISTS idx_contacts_account ON contacts(whats_app_account)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_canned_responses_org_name ON canned_responses(organization_id, name)`,
 		`CREATE INDEX IF NOT EXISTS idx_canned_responses_active ON canned_responses(organization_id, is_active, usage_count DESC)`,
@@ -401,6 +409,22 @@ func BackfillLastInboundAt(db *gorm.DB) error {
 			GROUP BY contact_id
 		) sub
 		WHERE c.id = sub.contact_id AND c.last_inbound_at IS NULL AND c.deleted_at IS NULL
+	`).Error
+}
+
+// BackfillReadByAgentAt stamps read_by_agent_at on incoming messages that were
+// already read before the column existed. Prior to it, "agent read this" was
+// encoded by overwriting the message's delivery status with 'read', so those
+// rows are the ones to carry over — without this, every historical chat would
+// come back with a full unread badge after the upgrade.
+//
+// Nothing sets an incoming message's status to 'read' any more, so on later
+// startups this matches no rows.
+func BackfillReadByAgentAt(db *gorm.DB) error {
+	return db.Exec(`
+		UPDATE messages
+		SET read_by_agent_at = COALESCE(updated_at, created_at)
+		WHERE direction = 'incoming' AND status = 'read' AND read_by_agent_at IS NULL
 	`).Error
 }
 

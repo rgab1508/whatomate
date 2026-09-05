@@ -1733,15 +1733,14 @@ func (a *App) saveIncomingMessage(account *models.WhatsAppAccount, contact *mode
 		return
 	}
 
-	// If the chatbot will handle this conversation (enabled + no active
-	// agent transfer), pre-mark the message as read so the contact-list
-	// unread badge doesn't briefly flash before the bot's reply arrives.
-	// See issue #280.
-	if a.willChatbotHandle(account, contact) {
-		a.DB.Model(&models.Message{}).Where("id = ?", message.ID).
-			Update("status", models.MessageStatusRead)
-		message.Status = models.MessageStatusRead
-	}
+	// The message stays unread until something actually consumes it — the bot
+	// replying (SendMessage with MarkIncomingRead) or an agent opening the
+	// chat. It is *not* pre-marked here: a chatbot being enabled is not proof
+	// that this message gets handled (no matching flow, ended session, out of
+	// business hours), and pre-marking hid those from the unread badge
+	// entirely. The badge is kept from flashing for bot-handled chats via the
+	// bot_handling hint on the WebSocket broadcast instead. See issue #280.
+	botWillHandle := a.willChatbotHandle(account, contact)
 
 	// Update contact's last message info
 	preview := content
@@ -1763,7 +1762,7 @@ func (a *App) saveIncomingMessage(account *models.WhatsAppAccount, contact *mode
 	a.Log.Info("Saved incoming message", "message_id", message.ID, "contact_id", contact.ID, "media_url", message.MediaURL)
 
 	// Broadcast new message via WebSocket
-	a.broadcastNewMessage(account.OrganizationID, &message, contact)
+	a.broadcastNewMessageWithBotHint(account.OrganizationID, &message, contact, botWillHandle)
 
 	// Dispatch webhook for incoming message
 	a.DispatchWebhook(account.OrganizationID, models.WebhookEventMessageIncoming, MessageEventData{

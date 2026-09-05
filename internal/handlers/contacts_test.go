@@ -855,10 +855,12 @@ func TestApp_GetMessages(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, fasthttp.StatusOK, testutil.GetResponseStatusCode(req))
 
-		// Verify message was marked as read in the database
+		// Verify message was stamped read-by-agent in the database, and that the
+		// WhatsApp delivery status was left alone
 		var updatedMsg models.Message
 		require.NoError(t, app.DB.Where("id = ?", msg.ID).First(&updatedMsg).Error)
-		assert.Equal(t, models.MessageStatusRead, updatedMsg.Status)
+		assert.NotNil(t, updatedMsg.ReadByAgentAt)
+		assert.Equal(t, models.MessageStatusDelivered, updatedMsg.Status)
 	})
 
 	t.Run("message response includes correct fields", func(t *testing.T) {
@@ -1533,7 +1535,8 @@ func TestApp_GetContact_MultipleUnreadMessages(t *testing.T) {
 		require.NoError(t, app.DB.Create(msg).Error)
 	}
 
-	// Create 1 read incoming message
+	// Create 1 incoming message an agent has already read
+	readAt := time.Now()
 	readMsg := &models.Message{
 		BaseModel:       models.BaseModel{ID: uuid.New()},
 		OrganizationID:  org.ID,
@@ -1542,7 +1545,8 @@ func TestApp_GetContact_MultipleUnreadMessages(t *testing.T) {
 		Direction:       models.DirectionIncoming,
 		MessageType:     models.MessageTypeText,
 		Content:         "Read message",
-		Status:          models.MessageStatusRead,
+		Status:          models.MessageStatusDelivered,
+		ReadByAgentAt:   &readAt,
 	}
 	require.NoError(t, app.DB.Create(readMsg).Error)
 
@@ -1571,7 +1575,7 @@ func TestApp_GetContact_MultipleUnreadMessages(t *testing.T) {
 		Data handlers.ContactResponse `json:"data"`
 	}
 	require.NoError(t, json.Unmarshal(testutil.GetResponseBody(req), &resp))
-	// Only 3 incoming delivered (not read) messages should be counted
+	// Only the 3 incoming messages no agent has read should be counted
 	assert.Equal(t, 3, resp.Data.UnreadCount)
 }
 

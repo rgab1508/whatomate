@@ -249,3 +249,58 @@ func TestCreateDefaultAdmin_UsesExistingOrg(t *testing.T) {
 	db.Model(&models.Organization{}).Count(&orgCount)
 	assert.Equal(t, int64(1), orgCount, "should reuse existing organization")
 }
+
+// --- BackfillReadByAgentAt ---
+
+func TestBackfillReadByAgentAt(t *testing.T) {
+	db := testutil.SetupTestDB(t)
+	cleanAll(t, db)
+
+	org := testutil.CreateTestOrganization(t, db)
+	account := testutil.CreateTestWhatsAppAccount(t, db, org.ID)
+	contact := testutil.CreateTestContact(t, db, org.ID)
+
+	newMsg := func(direction models.Direction, status models.MessageStatus) *models.Message {
+		msg := &models.Message{
+			BaseModel:       models.BaseModel{ID: uuid.New()},
+			OrganizationID:  org.ID,
+			WhatsAppAccount: account.Name,
+			ContactID:       contact.ID,
+			Direction:       direction,
+			MessageType:     models.MessageTypeText,
+			Content:         "msg",
+			Status:          status,
+		}
+		require.NoError(t, db.Create(msg).Error)
+		return msg
+	}
+
+	// Legacy rows: "read" was how an agent-read incoming message was recorded.
+	legacyRead := newMsg(models.DirectionIncoming, models.MessageStatusRead)
+	stillUnread := newMsg(models.DirectionIncoming, models.MessageStatusReceived)
+	outgoingRead := newMsg(models.DirectionOutgoing, models.MessageStatusRead)
+
+	require.NoError(t, database.BackfillReadByAgentAt(db))
+
+	// Fresh dest each time: GORM folds a populated primary key on the
+	// destination struct into the query conditions.
+	reload := func(id uuid.UUID) models.Message {
+		var got models.Message
+		require.NoError(t, db.Where("id = ?", id).First(&got).Error)
+		return got
+	}
+
+	assert.NotNil(t, reload(legacyRead.ID).ReadByAgentAt, "previously-read incoming message should be stamped")
+	assert.Nil(t, reload(stillUnread.ID).ReadByAgentAt, "unread incoming message should stay unread")
+	assert.Nil(t, reload(outgoingRead.ID).ReadByAgentAt, "outgoing message read by the customer is not agent-read")
+
+	// Re-running must not stamp anything new.
+	stamped := func() int64 {
+		var n int64
+		db.Model(&models.Message{}).Where("read_by_agent_at IS NOT NULL").Count(&n)
+		return n
+	}
+	before := stamped()
+	require.NoError(t, database.BackfillReadByAgentAt(db))
+	assert.Equal(t, before, stamped(), "backfill should be idempotent")
+}

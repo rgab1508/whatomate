@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/shridarpatil/whatomate/internal/config"
 	"github.com/shridarpatil/whatomate/internal/models"
 	"github.com/shridarpatil/whatomate/pkg/whatsapp"
 	"github.com/shridarpatil/whatomate/test/testutil"
@@ -655,6 +656,84 @@ func TestSaveIncomingMessage_LongContent(t *testing.T) {
 	// Preview should be truncated to 97 chars + "..."
 	assert.Len(t, dbContact.LastMessagePreview, 100)
 	assert.True(t, len(dbContact.LastMessagePreview) <= 100)
+}
+
+// An enabled chatbot must not make the message read on arrival — only the bot
+// actually replying (or an agent opening the chat) does that. Otherwise every
+// message the bot never answers disappears from the unread badge. See #280.
+func TestSaveIncomingMessage_StaysUnreadWhileChatbotEnabled(t *testing.T) {
+	app := newProcessorTestApp(t)
+	org, account := createProcessorTestOrg(t, app)
+	contact := testutil.CreateTestContact(t, app.DB, org.ID)
+
+	settings := &models.ChatbotSettings{
+		BaseModel:       models.BaseModel{ID: uuid.New()},
+		OrganizationID:  org.ID,
+		WhatsAppAccount: account.Name,
+		IsEnabled:       true,
+	}
+	require.NoError(t, app.DB.Create(settings).Error)
+
+	waMsgID := "wamid." + uuid.New().String()[:16]
+	app.saveIncomingMessage(account, contact, waMsgID, "text", "Anyone there?", nil, "", "", nil)
+
+	var msg models.Message
+	require.NoError(t, app.DB.Where("whats_app_message_id = ?", waMsgID).First(&msg).Error)
+	assert.Nil(t, msg.ReadByAgentAt)
+	assert.Equal(t, models.MessageStatusReceived, msg.Status)
+
+	var unread int64
+	app.DB.Model(&models.Message{}).
+		Where("contact_id = ? AND direction = ? AND read_by_agent_at IS NULL", contact.ID, models.DirectionIncoming).
+		Count(&unread)
+	assert.Equal(t, int64(1), unread)
+}
+
+// markMessagesAsRead is what the bot reply and chat-open paths both call.
+func TestMarkMessagesAsRead_StampsIncomingOnly(t *testing.T) {
+	app := newProcessorTestApp(t)
+	// Marking read resolves the account to send read receipts, which decrypts
+	// its secrets — needs an encryption key.
+	app.Config = &config.Config{
+		App: config.AppConfig{EncryptionKey: "test-encryption-key-for-handlers-longer-than-32-chars"},
+	}
+	org, account := createProcessorTestOrg(t, app)
+	contact := testutil.CreateTestContactWith(t, app.DB, org.ID, testutil.WithContactAccount(account.Name))
+
+	incoming := &models.Message{
+		BaseModel:       models.BaseModel{ID: uuid.New()},
+		OrganizationID:  org.ID,
+		WhatsAppAccount: account.Name,
+		ContactID:       contact.ID,
+		Direction:       models.DirectionIncoming,
+		MessageType:     models.MessageTypeText,
+		Content:         "Hi",
+		Status:          models.MessageStatusReceived,
+	}
+	require.NoError(t, app.DB.Create(incoming).Error)
+
+	outgoing := &models.Message{
+		BaseModel:       models.BaseModel{ID: uuid.New()},
+		OrganizationID:  org.ID,
+		WhatsAppAccount: account.Name,
+		ContactID:       contact.ID,
+		Direction:       models.DirectionOutgoing,
+		MessageType:     models.MessageTypeText,
+		Content:         "Hello",
+		Status:          models.MessageStatusSent,
+	}
+	require.NoError(t, app.DB.Create(outgoing).Error)
+
+	app.markMessagesAsRead(org.ID, contact.ID, contact)
+
+	var dbIncoming, dbOutgoing models.Message
+	require.NoError(t, app.DB.First(&dbIncoming, incoming.ID).Error)
+	require.NoError(t, app.DB.First(&dbOutgoing, outgoing.ID).Error)
+
+	assert.NotNil(t, dbIncoming.ReadByAgentAt)
+	// Delivery status is the customer's blue-tick state — left untouched.
+	assert.Equal(t, models.MessageStatusReceived, dbIncoming.Status)
+	assert.Nil(t, dbOutgoing.ReadByAgentAt)
 }
 
 // =============================================================================

@@ -485,6 +485,15 @@ func (a *App) finalizeMessageSend(msg *models.Message, req OutgoingMessageReques
 
 // broadcastNewMessage broadcasts a new message via WebSocket
 func (a *App) broadcastNewMessage(orgID uuid.UUID, msg *models.Message, contact *models.Contact) {
+	a.broadcastNewMessageWithBotHint(orgID, msg, contact, false)
+}
+
+// broadcastNewMessageWithBotHint is broadcastNewMessage plus a bot_handling
+// hint: true when the chatbot is expected to answer this incoming message, so
+// the UI can hold off on incrementing the unread badge for a chat no agent
+// needs to touch. A hint only — the stored message is still unread until
+// something actually consumes it. See issue #280.
+func (a *App) broadcastNewMessageWithBotHint(orgID uuid.UUID, msg *models.Message, contact *models.Contact, botHandling bool) {
 	if a.WSHub == nil {
 		return
 	}
@@ -515,6 +524,11 @@ func (a *App) broadcastNewMessage(orgID uuid.UUID, msg *models.Message, contact 
 		"created_at":       msg.CreatedAt,
 		"updated_at":       msg.UpdatedAt,
 		"is_reply":         msg.IsReply,
+		"bot_handling":     botHandling,
+	}
+
+	if msg.ReadByAgentAt != nil {
+		payload["read_by_agent_at"] = msg.ReadByAgentAt
 	}
 
 	// Add interactive data

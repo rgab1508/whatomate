@@ -106,6 +106,52 @@ export const useContactsStore = defineStore('contacts', () => {
   // visible list is whatever the server returned — no extra local filtering.
   const filteredContacts = computed(() => contacts.value)
 
+  // Contacts whose latest incoming message the chatbot is expected to answer
+  // (bot_handling on the new-message WS event), mapped to when we heard about
+  // it. Their unread badge is held at zero for a short grace period so a
+  // bot-handled exchange doesn't flash a count at agents who have nothing to
+  // do. Purely cosmetic — the server still counts the message as unread, so if
+  // the bot doesn't reply (no matching flow, ended session, out of business
+  // hours) the badge appears once the grace period lapses. See issue #280.
+  const BOT_HANDLING_GRACE_MS = 15000
+  const botHandlingSince = new Map<string, number>()
+  const botHandlingTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+  function noteBotHandling(contactId: string) {
+    botHandlingSince.set(contactId, Date.now())
+    // Re-check once the grace period lapses so a bot that never replied still
+    // surfaces its badge without waiting for the next WebSocket event.
+    clearTimeout(botHandlingTimers.get(contactId))
+    botHandlingTimers.set(contactId, setTimeout(() => {
+      botHandlingTimers.delete(contactId)
+      botHandlingSince.delete(contactId)
+      fetchContacts()
+    }, BOT_HANDLING_GRACE_MS + 500))
+  }
+
+  function clearBotHandling(contactId: string) {
+    botHandlingSince.delete(contactId)
+    clearTimeout(botHandlingTimers.get(contactId))
+    botHandlingTimers.delete(contactId)
+  }
+
+  function isBotHandling(contactId: string): boolean {
+    const since = botHandlingSince.get(contactId)
+    if (since === undefined) return false
+    if (Date.now() - since > BOT_HANDLING_GRACE_MS) {
+      botHandlingSince.delete(contactId)
+      return false
+    }
+    return true
+  }
+
+  function suppressBotHandledUnread(list: Contact[]): Contact[] {
+    for (const c of list) {
+      if (isBotHandling(c.id)) c.unread_count = 0
+    }
+    return list
+  }
+
   const sortedContacts = computed(() => {
     return [...filteredContacts.value].sort((a, b) => {
       const dateA = a.last_message_at ? new Date(a.last_message_at).getTime() : 0
@@ -126,7 +172,7 @@ export const useContactsStore = defineStore('contacts', () => {
       })
       // API returns { status: "success", data: { contacts: [...], total: number } }
       const data = response.data.data || response.data
-      contacts.value = data.contacts || []
+      contacts.value = suppressBotHandledUnread(data.contacts || [])
       contactsTotal.value = data.total ?? contacts.value.length
       contactsPage.value = 1
     } catch (error) {
@@ -151,7 +197,7 @@ export const useContactsStore = defineStore('contacts', () => {
         search
       })
       const data = response.data.data || response.data
-      const newContacts = data.contacts || []
+      const newContacts = suppressBotHandledUnread(data.contacts || [])
 
       if (newContacts.length > 0) {
         // Append new contacts, avoiding duplicates
@@ -293,7 +339,7 @@ export const useContactsStore = defineStore('contacts', () => {
     if (contact) {
       contact.last_message_at = message.created_at
       if (message.direction === 'incoming') {
-        contact.unread_count++
+        if (!isBotHandling(contact.id)) contact.unread_count++
         contact.last_inbound_at = message.created_at
         contact.service_window_open = true
       }
@@ -332,6 +378,9 @@ export const useContactsStore = defineStore('contacts', () => {
     replyingTo.value = null // Clear reply state when switching contacts
     if (contact) {
       contact.unread_count = 0
+      // The agent opened the chat, so the server is about to stamp these read
+      // regardless of the bot — drop the cosmetic hold.
+      clearBotHandling(contact.id)
     }
   }
 
@@ -407,6 +456,8 @@ export const useContactsStore = defineStore('contacts', () => {
     setReplyingTo,
     clearReplyingTo,
     updateMessageReactions,
-    updateContactTags
+    updateContactTags,
+    noteBotHandling,
+    clearBotHandling
   }
 })
