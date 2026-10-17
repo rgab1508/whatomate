@@ -459,6 +459,16 @@ watch(phoneSearch, () => {
             <IVRPathTree :steps="selectedLog.ivr_path.steps" />
           </div>
 
+          <div v-if="selectedLog.ivr_path?.variables && Object.keys(selectedLog.ivr_path.variables).length">
+            <p class="text-sm text-muted-foreground mb-2">{{ t('calling.ivrVariables') }}</p>
+            <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+              <template v-for="(value, key) in selectedLog.ivr_path.variables" :key="key">
+                <dt class="font-mono text-muted-foreground">{{ key }}</dt>
+                <dd class="font-mono break-all">{{ value }}</dd>
+              </template>
+            </dl>
+          </div>
+
           <div v-if="selectedLog.recording_s3_key" class="space-y-2">
             <p class="text-sm text-muted-foreground">{{ t('calling.recording') }}</p>
             <div v-if="recordingLoading" class="flex items-center gap-2 text-sm text-muted-foreground">

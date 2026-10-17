@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/expr-lang/expr"
 	"github.com/google/uuid"
+	"github.com/shridarpatil/whatomate/internal/flowgraph"
 	"github.com/shridarpatil/whatomate/internal/models"
 	"unicode"
 )
@@ -703,35 +703,10 @@ func (a *App) execChatCondition(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, 
 	return nodeOutcome{outcome: "false"}, nil
 }
 
-// evaluateConditionExpression compiles + runs a boolean expression via
-// expr-lang/expr against SessionData. The result is coerced to bool —
-// non-bool truthy values count as true (matches expr's natural casting).
+// evaluateConditionExpression evaluates a condition node's expression against
+// SessionData. See flowgraph.EvaluateCondition.
 func evaluateConditionExpression(expression string, data models.JSONB) (bool, error) {
-	env := make(map[string]any, len(data))
-	maps.Copy(env, data)
-
-	program, err := expr.Compile(expression, expr.Env(env), expr.AllowUndefinedVariables())
-	if err != nil {
-		return false, fmt.Errorf("compile: %w", err)
-	}
-	out, err := expr.Run(program, env)
-	if err != nil {
-		return false, fmt.Errorf("run: %w", err)
-	}
-	switch v := out.(type) {
-	case bool:
-		return v, nil
-	case nil:
-		return false, nil
-	case string:
-		return v != "" && strings.ToLower(v) != "false", nil
-	case float64:
-		return v != 0, nil
-	case int:
-		return v != 0, nil
-	}
-	// Anything else (slices, maps) counts as truthy if non-nil.
-	return out != nil, nil
+	return flowgraph.EvaluateCondition(expression, data)
 }
 
 // execChatTiming routes "in_hours" / "out_of_hours" based on a per-day
@@ -751,9 +726,21 @@ func evaluateConditionExpression(expression string, data models.JSONB) (bool, er
 // IVR's behavior.
 func (a *App) execChatTiming(node *ChatNode, ctx *chatNodeCtx) (nodeOutcome, error) {
 	rawSchedule, _ := node.Config["schedule"].([]any)
-	outcome := evaluateTimingSchedule(time.Now(), rawSchedule, a.Log)
-	_ = ctx // ctx unused — included for symmetry with other executors
+	now := time.Now().In(flowgraph.Location(a.orgTimezone(ctx.session.OrganizationID)))
+	outcome := evaluateTimingSchedule(now, rawSchedule, a.Log)
 	return nodeOutcome{outcome: outcome}, nil
+}
+
+// orgTimezone is the organization's timezone setting (Settings → General),
+// or "" when unset or unreadable. Timing nodes evaluate business hours in it.
+func (a *App) orgTimezone(orgID uuid.UUID) string {
+	var tz string
+	if err := a.DB.Raw(`SELECT COALESCE(settings->>'timezone', '') FROM organizations WHERE id = ?`, orgID).
+		Scan(&tz).Error; err != nil {
+		a.Log.Warn("Failed to read organization timezone", "error", err, "org_id", orgID)
+		return ""
+	}
+	return tz
 }
 
 // evaluateTimingSchedule is the pure decision function, factored out for

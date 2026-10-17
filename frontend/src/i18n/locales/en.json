@@ -2418,6 +2418,7 @@
     "duration": "Duration",
     "ivrFlow": "IVR Flow",
     "ivrPath": "IVR Path",
+    "ivrVariables": "Call Values",
     "account": "Account",
     "time": "Time",
     "startedAt": "Started At",

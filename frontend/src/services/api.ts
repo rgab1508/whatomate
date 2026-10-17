@@ -1060,7 +1060,7 @@ export interface CallLog {
 }
 
 // v2 Node-based IVR Flow types
-export type IVRNodeType = 'greeting' | 'menu' | 'gather' | 'http_callback' | 'transfer' | 'goto_flow' | 'timing' | 'hangup'
+export type IVRNodeType = 'greeting' | 'menu' | 'gather' | 'http_callback' | 'transfer' | 'goto_flow' | 'timing' | 'hangup' | 'delay' | 'condition'
 
 export interface IVRNodePosition {
   x: number

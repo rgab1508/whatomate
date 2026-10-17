@@ -102,6 +102,8 @@ const (
 	IVRNodeGotoFlow     IVRNodeType = "goto_flow"
 	IVRNodeTiming       IVRNodeType = "timing"
 	IVRNodeHangup       IVRNodeType = "hangup"
+	IVRNodeDelay        IVRNodeType = "delay"
+	IVRNodeCondition    IVRNodeType = "condition"
 )
 
 // TransferHTTPCallback holds the configuration for a single transfer lifecycle HTTP callback.
@@ -121,7 +123,8 @@ type TransferCallbacks struct {
 // IVRNode, IVREdge and IVRFlowGraph are the IVR domain's views of the shared
 // flow-graph types, specialized to IVRNodeType. Edge conditions for the IVR
 // engine include "default", "digit:N", "timeout", "max_retries", "http:2xx",
-// "http:non2xx", "in_hours", "out_of_hours". Traversal (BuildMaps/Node/
+// "http:non2xx", "in_hours", "out_of_hours", "true"/"false" from a condition,
+// and for a dynamic menu "selected" and "no_options". Traversal (BuildMaps/Node/
 // ResolveEdge/OutgoingEdges) lives in internal/flowgraph.
 type (
 	IVRNode      = flowgraph.Node[IVRNodeType]
@@ -131,7 +134,11 @@ type (
 
 // IVRContext holds runtime state during IVR flow execution.
 type IVRContext struct {
-	Variables   map[string]string
+	Variables map[string]string
+	// Values holds typed copies of variables that came from JSON (HTTP
+	// response mapping, http_status), so condition expressions can compare
+	// `exists == true` or `slot_count > 0` instead of matching strings.
+	Values      map[string]any
 	CallerPhone string
 	CallID      string
 	CurrentNode string
@@ -150,6 +157,7 @@ type Manager struct {
 	s3       *storage.S3Client // nil when recording is disabled
 	redis    *redis.Client
 	assigner *assignment.Assigner
+	tts      Synthesizer // nil when TTS is not configured
 }
 
 // NewManager creates a new call session manager

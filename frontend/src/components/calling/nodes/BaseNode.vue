@@ -23,6 +23,8 @@ const gradientMap: Record<string, string> = {
   'bg-red-600': 'from-red-600 to-rose-500',
   'bg-cyan-600': 'from-cyan-600 to-cyan-500',
   'bg-teal-600': 'from-teal-600 to-teal-500',
+  'bg-slate-600': 'from-slate-600 to-slate-500',
+  'bg-indigo-600': 'from-indigo-600 to-indigo-500',
 }
 
 const headerGradient = computed(() => gradientMap[props.headerClass] || props.headerClass)

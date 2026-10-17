@@ -250,6 +250,8 @@ func runServer(args []string) {
 			OpusencBinary: cfg.TTS.OpusencBinary,
 			AudioDir:      cfg.Calling.AudioDir,
 		}
+		// Prompts with {{variables}} are synthesized during the call.
+		app.CallManager.SetTTS(app.TTS)
 		lo.Info("TTS initialized", "piper", cfg.TTS.PiperBinary, "model", cfg.TTS.PiperModel)
 	}
 

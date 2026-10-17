@@ -14,6 +14,8 @@ const summary = computed(() => {
   return `${method} ${url}`
 })
 
+const mappedCount = computed(() => Object.keys(props.data?.config?.response_mapping || {}).filter(k => k).length)
+
 const outputHandles = [
   { id: 'http:2xx', label: '2xx', title: 'Success - HTTP 200-299 response' },
   { id: 'http:non2xx', label: 'Error', title: 'Error - HTTP non-2xx or request failed' },
@@ -24,5 +26,6 @@ const outputHandles = [
   <BaseNode :label="data?.label || 'HTTP Callback'" header-class="bg-orange-600" :output-handles="outputHandles" :has-input="!data?.isEntryNode">
     <template #icon><Globe class="w-4 h-4" /></template>
     <p class="truncate font-mono text-[10px]">{{ summary }}</p>
+    <p v-if="mappedCount" class="text-[10px] text-orange-600 mt-0.5">Saves {{ mappedCount }} variable{{ mappedCount === 1 ? '' : 's' }}</p>
   </BaseNode>
 </template>

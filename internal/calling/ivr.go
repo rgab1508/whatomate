@@ -3,12 +3,13 @@ package calling
 import (
 	"encoding/json"
 	"fmt"
-	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/pion/webrtc/v4"
+	"github.com/shridarpatil/whatomate/internal/flowgraph"
 	"github.com/shridarpatil/whatomate/internal/models"
 	"github.com/shridarpatil/whatomate/pkg/whatsapp"
 )
@@ -46,6 +47,7 @@ func (m *Manager) runIVRFlow(session *CallSession, waAccount *whatsapp.Account) 
 			"caller_phone": session.CallerPhone,
 			"call_id":      session.ID,
 		},
+		Values:      map[string]any{},
 		CallerPhone: session.CallerPhone,
 		CallID:      session.ID,
 		CurrentNode: graph.EntryNode,
@@ -150,9 +152,13 @@ func (m *Manager) executeNodeLoop(session *CallSession, waAccount *whatsapp.Acco
 
 		switch node.Type {
 		case IVRNodeGreeting:
-			outcome = m.executeGreeting(session, node, player)
+			outcome = m.executeGreeting(session, node, ctx, player)
 		case IVRNodeMenu:
-			outcome = m.executeMenu(session, node, ctx, player)
+			if dynamic, _ := node.Config["dynamic_options"].(bool); dynamic {
+				outcome = m.executeDynamicMenu(session, node, ctx, player)
+			} else {
+				outcome = m.executeMenu(session, node, ctx, player)
+			}
 		case IVRNodeGather:
 			outcome = m.executeGather(session, node, ctx, player)
 		case IVRNodeHTTPCallback:
@@ -178,6 +184,13 @@ func (m *Manager) executeNodeLoop(session *CallSession, waAccount *whatsapp.Acco
 			return // terminal (recursive call to runIVRFlow)
 		case IVRNodeTiming:
 			outcome = m.executeTiming(session, node)
+		case IVRNodeCondition:
+			outcome = m.executeCondition(session, node, ctx)
+		case IVRNodeDelay:
+			if outcome = m.executeDelay(session, node); outcome == "" {
+				m.saveIVRPath(session, ctx)
+				return // call ended during the pause
+			}
 		case IVRNodeHangup:
 			ctx.Path = append(ctx.Path, map[string]string{
 				"node": node.ID, "type": string(node.Type), "label": node.Label,
@@ -197,6 +210,10 @@ func (m *Manager) executeNodeLoop(session *CallSession, waAccount *whatsapp.Acco
 		}
 
 		// For menu nodes, record the selected digit and option label
+		if node.Type == IVRNodeMenu && outcome == "selected" {
+			step["digit"] = ctx.Variables["last_menu_digit"]
+			step["option_label"] = ctx.Variables["selected_option_label"]
+		}
 		if node.Type == IVRNodeMenu && strings.HasPrefix(outcome, "digit:") {
 			digit := strings.TrimPrefix(outcome, "digit:")
 			step["digit"] = digit
@@ -214,8 +231,13 @@ func (m *Manager) executeNodeLoop(session *CallSession, waAccount *whatsapp.Acco
 
 		ctx.Path = append(ctx.Path, step)
 
-		// Resolve the next node via edges
+		// Resolve the next node via edges. A menu that heard nothing reports
+		// "timeout"; flows wired before that outcome existed handle it on
+		// their max_retries edge.
 		nextID := graph.ResolveEdge(node.ID, outcome)
+		if nextID == "" && outcome == "timeout" {
+			nextID = graph.ResolveEdge(node.ID, "max_retries")
+		}
 		if nextID == "" {
 			m.log.Info("No matching edge, ending IVR flow", "call_id", session.ID, "node", node.ID, "outcome", outcome)
 			break
@@ -225,18 +247,16 @@ func (m *Manager) executeNodeLoop(session *CallSession, waAccount *whatsapp.Acco
 	}
 
 	// Save the IVR path on exit
-	m.saveIVRPath(session, ctx.Path)
+	m.saveIVRPath(session, ctx)
 }
 
 // --- Node Executors ---
 
 // executeGreeting plays audio or TTS, returns "default".
-func (m *Manager) executeGreeting(session *CallSession, node *IVRNode, player *AudioPlayer) string {
-	audioFile, _ := node.Config["audio_file"].(string)
+func (m *Manager) executeGreeting(session *CallSession, node *IVRNode, ctx *IVRContext, player *AudioPlayer) string {
 	interruptible, _ := node.Config["interruptible"].(bool)
 
-	if audioFile != "" && m.config.AudioDir != "" {
-		fullPath := filepath.Join(m.config.AudioDir, audioFile)
+	if fullPath := m.promptAudioPath(session, node, ctx); fullPath != "" {
 		m.drainDTMF(session)
 
 		if interruptible {
@@ -256,14 +276,9 @@ func (m *Manager) executeGreeting(session *CallSession, node *IVRNode, player *A
 
 // executeMenu plays a prompt, waits for single DTMF, validates against
 // configured options, and retries on timeout or invalid digit.
-// Returns "digit:N" on valid input, "timeout" on single-attempt timeout,
-// or "max_retries" when all attempts are exhausted.
+// Returns "digit:N" on valid input, else "timeout" (no key at all) or
+// "max_retries" (only invalid keys).
 func (m *Manager) executeMenu(session *CallSession, node *IVRNode, ctx *IVRContext, player *AudioPlayer) string {
-	audioFile, _ := node.Config["audio_file"].(string)
-	timeoutSecs := getConfigInt(node.Config, "timeout_seconds", 10)
-	maxRetries := getConfigInt(node.Config, "max_retries", 3)
-	timeout := time.Duration(timeoutSecs) * time.Second
-
 	// Build set of valid digits from menu options
 	validDigits := make(map[string]bool)
 	if opts, ok := node.Config["options"].(map[string]any); ok {
@@ -272,10 +287,33 @@ func (m *Manager) executeMenu(session *CallSession, node *IVRNode, ctx *IVRConte
 		}
 	}
 
-	var fullPath string
-	if audioFile != "" && m.config.AudioDir != "" {
-		fullPath = filepath.Join(m.config.AudioDir, audioFile)
+	digitStr, outcome := m.promptForDigit(session, node, ctx, player, func(d string) bool {
+		return len(validDigits) == 0 || validDigits[d]
+	})
+	if outcome != "" {
+		return outcome
 	}
+
+	// Store the selected digit in context for use by subsequent nodes
+	ctx.Variables["menu_"+node.ID] = digitStr
+	ctx.Variables["last_menu_digit"] = digitStr
+	return fmt.Sprintf("digit:%s", digitStr)
+}
+
+// promptForDigit plays a menu node's prompt and waits for a single DTMF digit
+// that valid accepts, replaying the prompt on timeout or an invalid digit up to
+// max_retries times. Returns the digit and "", or "" and the reason it gave
+// up: "timeout" when the caller never pressed a key, "max_retries" when they
+// kept pressing invalid ones.
+func (m *Manager) promptForDigit(session *CallSession, node *IVRNode, ctx *IVRContext, player *AudioPlayer, valid func(string) bool) (string, string) {
+	timeoutSecs := getConfigInt(node.Config, "timeout_seconds", 10)
+	maxRetries := getConfigInt(node.Config, "max_retries", 3)
+	timeout := time.Duration(timeoutSecs) * time.Second
+
+	// Resolved once: a prompt with variables is synthesized on the first
+	// attempt and replayed from the same file on retries.
+	fullPath := m.promptAudioPath(session, node, ctx)
+	pressedAny := false
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		m.drainDTMF(session)
@@ -316,24 +354,24 @@ func (m *Manager) executeMenu(session *CallSession, node *IVRNode, ctx *IVRConte
 			continue
 		}
 
+		pressedAny = true
 		digitStr := string(digit)
-		if len(validDigits) == 0 || validDigits[digitStr] {
-			// Store the selected digit in context for use by subsequent nodes
-			ctx.Variables["menu_"+node.ID] = digitStr
-			ctx.Variables["last_menu_digit"] = digitStr
-			return fmt.Sprintf("digit:%s", digitStr)
+		if valid(digitStr) {
+			return digitStr, ""
 		}
 
 		// Invalid digit — log and retry with prompt replay
 		m.log.Debug("Menu invalid digit", "call_id", session.ID, "digit", digitStr, "attempt", attempt+1)
 	}
 
-	return "max_retries"
+	if !pressedAny {
+		return "", "timeout"
+	}
+	return "", "max_retries"
 }
 
 // executeGather collects multi-digit input, stores in context.
 func (m *Manager) executeGather(session *CallSession, node *IVRNode, ctx *IVRContext, player *AudioPlayer) string {
-	audioFile, _ := node.Config["audio_file"].(string)
 	maxDigits := getConfigInt(node.Config, "max_digits", 10)
 	terminator, _ := node.Config["terminator"].(string)
 	if terminator == "" {
@@ -346,8 +384,7 @@ func (m *Manager) executeGather(session *CallSession, node *IVRNode, ctx *IVRCon
 	m.drainDTMF(session)
 
 	// Play prompt (non-interruptible for gather — we need all digits)
-	if audioFile != "" && m.config.AudioDir != "" {
-		fullPath := filepath.Join(m.config.AudioDir, audioFile)
+	if fullPath := m.promptAudioPath(session, node, ctx); fullPath != "" {
 		if _, err := player.PlayFile(fullPath); err != nil {
 			m.log.Error("Failed to play gather audio", "error", err, "call_id", session.ID)
 		}
@@ -425,6 +462,16 @@ func (m *Manager) executeHTTPCallback(session *CallSession, node *IVRNode, ctx *
 	if responseStoreAs != "" {
 		ctx.Variables[responseStoreAs] = result.Body
 	}
+	ctx.Variables["http_status"] = strconv.Itoa(result.StatusCode)
+	ctx.Values["http_status"] = result.StatusCode
+
+	if mapping, ok := node.Config["response_mapping"].(map[string]any); ok && result.StatusCode >= 200 && result.StatusCode < 300 {
+		if n, err := applyResponseMapping(result.Body, mapping, ctx); err != nil {
+			m.log.Error("HTTP callback response mapping failed", "error", err, "call_id", session.ID, "url", url)
+		} else {
+			m.log.Info("HTTP callback response mapped", "call_id", session.ID, "mapped", n, "configured", len(mapping))
+		}
+	}
 
 	m.log.Info("HTTP callback completed", "call_id", session.ID, "url", url, "status", result.StatusCode)
 
@@ -441,7 +488,7 @@ func (m *Manager) executeHTTPCallback(session *CallSession, node *IVRNode, ctx *
 // returns "").
 func (m *Manager) executeTransfer(session *CallSession, node *IVRNode, ctx *IVRContext, graph *IVRFlowGraph) string {
 	teamID, _ := node.Config["team_id"].(string)
-	m.saveIVRPath(session, ctx.Path)
+	m.saveIVRPath(session, ctx)
 
 	// Parse and store HTTP callbacks from the transfer node config
 	session.mu.Lock()
@@ -496,33 +543,33 @@ func (m *Manager) executeGotoFlow(session *CallSession, node *IVRNode, ctx *IVRC
 	flowID, _ := node.Config["flow_id"].(string)
 	if flowID == "" {
 		m.log.Error("goto_flow missing flow_id", "call_id", session.ID)
-		m.saveIVRPath(session, ctx.Path)
+		m.saveIVRPath(session, ctx)
 		return
 	}
 
 	targetFlowID, err := uuid.Parse(flowID)
 	if err != nil {
 		m.log.Error("Invalid goto_flow target ID", "error", err, "call_id", session.ID)
-		m.saveIVRPath(session, ctx.Path)
+		m.saveIVRPath(session, ctx)
 		return
 	}
 
 	targetFlowPtr := m.getIVRFlowCached(targetFlowID)
 	if targetFlowPtr == nil {
 		m.log.Error("Failed to load goto_flow target", "call_id", session.ID, "flow_id", flowID)
-		m.saveIVRPath(session, ctx.Path)
+		m.saveIVRPath(session, ctx)
 		return
 	}
 	targetFlow := *targetFlowPtr
 
 	if !targetFlow.IsActive {
 		m.log.Warn("goto_flow target is disabled", "call_id", session.ID, "flow_id", flowID)
-		m.saveIVRPath(session, ctx.Path)
+		m.saveIVRPath(session, ctx)
 		return
 	}
 
 	ctx.Path = append(ctx.Path, map[string]string{"action": "goto_flow", "flow": targetFlow.Name})
-	m.saveIVRPath(session, ctx.Path)
+	m.saveIVRPath(session, ctx)
 
 	// Switch to the new flow
 	session.mu.Lock()
@@ -538,7 +585,7 @@ func (m *Manager) executeGotoFlow(session *CallSession, node *IVRNode, ctx *IVRC
 
 // executeTiming branches based on business hours schedule.
 func (m *Manager) executeTiming(session *CallSession, node *IVRNode) string {
-	now := time.Now()
+	now := time.Now().In(flowgraph.Location(m.orgTimezone(session.OrganizationID)))
 	dayName := strings.ToLower(now.Weekday().String())
 
 	scheduleRaw, _ := node.Config["schedule"].([]any)
@@ -581,9 +628,7 @@ func (m *Manager) executeTiming(session *CallSession, node *IVRNode) string {
 
 // executeHangup plays optional goodbye audio and terminates the call. Terminal.
 func (m *Manager) executeHangup(session *CallSession, node *IVRNode, ctx *IVRContext, waAccount *whatsapp.Account, player *AudioPlayer) {
-	audioFile, _ := node.Config["audio_file"].(string)
-	if audioFile != "" && m.config.AudioDir != "" {
-		fullPath := filepath.Join(m.config.AudioDir, audioFile)
+	if fullPath := m.promptAudioPath(session, node, ctx); fullPath != "" {
 		if _, err := player.PlayFile(fullPath); err != nil {
 			m.log.Error("Failed to play hangup audio", "error", err, "call_id", session.ID)
 		}
@@ -597,7 +642,7 @@ func (m *Manager) executeHangup(session *CallSession, node *IVRNode, ctx *IVRCon
 			Update("disconnected_by", models.DisconnectedBySystem)
 	}
 
-	m.saveIVRPath(session, ctx.Path)
+	m.saveIVRPath(session, ctx)
 	if waAccount != nil {
 		m.terminateCall(session, waAccount)
 	} else {
@@ -657,18 +702,42 @@ func (m *Manager) waitForDTMF(session *CallSession, timeout time.Duration, maxRe
 	return 0, false
 }
 
-// saveIVRPath saves the recorded IVR navigation path to the call log.
-func (m *Manager) saveIVRPath(session *CallSession, path []map[string]string) {
-	if len(path) == 0 {
+// saveIVRPath saves the recorded IVR navigation path to the call log, with
+// the call's variables (gathered digits, API response fields, the chosen
+// menu option…) so the log shows what the caller entered and got back.
+func (m *Manager) saveIVRPath(session *CallSession, ctx *IVRContext) {
+	if len(ctx.Path) == 0 {
 		return
 	}
 
 	pathJSON := models.JSONB{}
-	pathJSON["steps"] = path
+	pathJSON["steps"] = ctx.Path
+	if len(ctx.Variables) > 0 {
+		vars := make(map[string]string, len(ctx.Variables))
+		for k, v := range ctx.Variables {
+			vars[k] = v
+		}
+		pathJSON["variables"] = vars
+	}
 
 	m.db.Model(&models.CallLog{}).
 		Where("id = ?", session.CallLogID).
 		Update("ivr_path", pathJSON)
+}
+
+// orgTimezone is the organization's timezone setting (Settings → General),
+// or "" when unset or unreadable.
+func (m *Manager) orgTimezone(orgID uuid.UUID) string {
+	if m.db == nil {
+		return ""
+	}
+	var tz string
+	if err := m.db.Raw(`SELECT COALESCE(settings->>'timezone', '') FROM organizations WHERE id = ?`, orgID).
+		Scan(&tz).Error; err != nil {
+		m.log.Warn("Failed to read organization timezone", "error", err, "org_id", orgID)
+		return ""
+	}
+	return tz
 }
 
 // getConfigInt extracts an int from a config map with a default fallback.

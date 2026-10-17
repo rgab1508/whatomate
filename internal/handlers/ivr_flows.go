@@ -750,7 +750,9 @@ func transcodeToOpus(inputPath, outputPath string) error {
 
 // generateIVRAudio iterates the flat v2 nodes array and generates TTS audio
 // for any node with a non-empty "greeting_text" in its config. The generated
-// audio filename is set as the node's "audio_file" config field.
+// audio filename is set as the node's "audio_file" config field. Text with
+// {{variables}} is skipped: the call manager speaks it during the call, once
+// the variables have values.
 func (a *App) generateIVRAudio(menu models.JSONB) error {
 	nodesRaw, ok := menu["nodes"]
 	if !ok {
@@ -778,7 +780,7 @@ func (a *App) generateIVRAudio(menu models.JSONB) error {
 			continue
 		}
 		greetingText, _ := config["greeting_text"].(string)
-		if greetingText == "" {
+		if greetingText == "" || strings.Contains(greetingText, "{{") {
 			continue
 		}
 		filename, err := a.TTS.Generate(greetingText)

@@ -186,6 +186,37 @@ function updateHeaderValue(key: string, value: string) {
   updateConfig('headers', headers)
 }
 
+// Renders "{{name}}" for help text; literal braces can't appear inside a
+// template interpolation.
+const varRef = (name: string) => `{{${name}}}`
+
+// HTTP response mapping helpers (variable name -> JSON path)
+function addMapping() {
+  const mapping = { ...(config.value.response_mapping || {}) }
+  mapping[''] = ''
+  updateConfig('response_mapping', mapping)
+}
+
+function removeMapping(key: string) {
+  const mapping = { ...(config.value.response_mapping || {}) }
+  delete mapping[key]
+  updateConfig('response_mapping', mapping)
+}
+
+function updateMappingKey(oldKey: string, newKey: string) {
+  if (oldKey === newKey) return
+  const mapping = { ...(config.value.response_mapping || {}) }
+  mapping[newKey] = mapping[oldKey]
+  delete mapping[oldKey]
+  updateConfig('response_mapping', mapping)
+}
+
+function updateMappingValue(key: string, value: string) {
+  const mapping = { ...(config.value.response_mapping || {}) }
+  mapping[key] = value
+  updateConfig('response_mapping', mapping)
+}
+
 // Transfer callback helpers
 const callbackEvents = ['on_waiting', 'on_connect'] as const
 type CallbackEvent = typeof callbackEvents[number]
@@ -302,6 +333,10 @@ const greetingTab = computed(() =>
             class="min-h-[60px] text-xs resize-none"
             :maxlength="500"
           />
+          <p class="text-[10px] text-muted-foreground mt-1">
+            Insert values with <code class="bg-muted px-1 rounded">{{ varRef('variable') }}</code>, e.g. a variable saved by an HTTP node.
+            Text with variables is spoken live during the call (about 1s to prepare); plain text is prepared when you save.
+          </p>
         </TabsContent>
       </Tabs>
     </div>
@@ -314,6 +349,10 @@ const greetingTab = computed(() =>
 
     <!-- Menu: options -->
     <template v-if="node.type === 'menu'">
+      <div class="flex items-center gap-2">
+        <Switch :checked="!!config.dynamic_options" @update:checked="(v: boolean) => updateConfig('dynamic_options', v)" />
+        <Label class="text-xs">Dynamic options (from a variable)</Label>
+      </div>
       <div class="space-y-1.5">
         <Label class="text-xs">Timeout (seconds)</Label>
         <Input type="number" :model-value="String(config.timeout_seconds || 10)" @update:model-value="(v: string) => updateConfig('timeout_seconds', parseInt(v) || 10)" class="h-8 text-sm" min="1" max="60" />
@@ -322,7 +361,27 @@ const greetingTab = computed(() =>
         <Label class="text-xs">Max Retries</Label>
         <Input type="number" :model-value="String(config.max_retries || 3)" @update:model-value="(v: string) => updateConfig('max_retries', parseInt(v) || 3)" class="h-8 text-sm" min="1" max="10" />
       </div>
-      <div class="space-y-1.5">
+      <template v-if="config.dynamic_options">
+        <div class="space-y-1.5">
+          <Label class="text-xs">Options Variable</Label>
+          <Input :model-value="config.options_variable || ''" @update:model-value="(v: string) => updateConfig('options_variable', v)" placeholder="e.g. slots" class="h-8 text-sm font-mono" />
+          <p class="text-[10px] text-muted-foreground">
+            A JSON array saved earlier in the call, usually by an HTTP node's response mapping. Each item is
+            <code class="bg-muted px-1 rounded">{"label": "4 to 5 PM", "value": "slot_123"}</code> (an optional
+            <code class="bg-muted px-1 rounded">"digit"</code> sets the key); items without a digit get keys 1, 2, 3… in order, up to 9.
+          </p>
+        </div>
+        <div class="space-y-1.5">
+          <Label class="text-xs">Store Choice As (variable name)</Label>
+          <Input :model-value="config.store_as || ''" @update:model-value="(v: string) => updateConfig('store_as', v)" placeholder="e.g. slot_id" class="h-8 text-sm font-mono" />
+          <p class="text-[10px] text-muted-foreground">
+            The chosen item's value. Also always available as <code class="bg-muted px-1 rounded">{{ varRef('selected_option_value') }}</code>,
+            <code class="bg-muted px-1 rounded">{{ varRef('selected_option_label') }}</code> and <code class="bg-muted px-1 rounded">{{ varRef('last_menu_digit') }}</code>.
+            With no options the menu is skipped through its "None" output.
+          </p>
+        </div>
+      </template>
+      <div v-else class="space-y-1.5">
         <div class="flex items-center justify-between">
           <Label class="text-xs">Menu Options</Label>
           <Button variant="outline" size="sm" class="h-6 text-xs" @click="addMenuOption">
@@ -406,6 +465,28 @@ const greetingTab = computed(() =>
         <Label class="text-xs">Store Response As (variable name)</Label>
         <Input :model-value="config.response_store_as || ''" @update:model-value="(v: string) => updateConfig('response_store_as', v)" placeholder="e.g. api_response" class="h-8 text-sm" />
       </div>
+      <div class="space-y-1.5">
+        <div class="flex items-center justify-between">
+          <Label class="text-xs">Response Mapping</Label>
+          <Button variant="outline" size="sm" class="h-6 text-xs" @click="addMapping">
+            <Plus class="h-3 w-3 mr-1" /> Add
+          </Button>
+        </div>
+        <div v-for="(path, key) in (config.response_mapping || {})" :key="String(key)" class="flex items-center gap-1">
+          <Input :model-value="String(key)" @update:model-value="(v: string) => updateMappingKey(String(key), v)" placeholder="Variable" class="h-7 text-xs flex-1 font-mono" />
+          <Input :model-value="String(path)" @update:model-value="(v: string) => updateMappingValue(String(key), v)" placeholder="JSON path" class="h-7 text-xs flex-1 font-mono" />
+          <Button variant="ghost" size="icon" class="h-6 w-6" @click="removeMapping(String(key))">
+            <Trash2 class="h-3 w-3 text-destructive" />
+          </Button>
+        </div>
+        <p class="text-[10px] text-muted-foreground">
+          Save fields of a 2xx JSON response as variables, e.g. <code class="bg-muted px-1 rounded">slots_prompt</code> ←
+          <code class="bg-muted px-1 rounded">prompt</code>, <code class="bg-muted px-1 rounded">first_id</code> ←
+          <code class="bg-muted px-1 rounded">data.slots[0].id</code>, <code class="bg-muted px-1 rounded">slot_count</code> ←
+          <code class="bg-muted px-1 rounded">slots.length</code>. Arrays are kept as JSON for a dynamic menu.
+          The status code is always in <code class="bg-muted px-1 rounded">{{ varRef('http_status') }}</code>.
+        </p>
+      </div>
     </template>
 
     <!-- Transfer: team selector -->
@@ -486,6 +567,44 @@ const greetingTab = computed(() =>
       </div>
     </template>
 
+    <!-- Condition: expression -->
+    <template v-if="node.type === 'condition'">
+      <div class="space-y-1.5">
+        <Label class="text-xs">Expression</Label>
+        <Textarea
+          :model-value="config.expression || ''"
+          @update:model-value="(v: string) => updateConfig('expression', v)"
+          placeholder="exists == true"
+          class="min-h-[60px] text-xs font-mono resize-none"
+        />
+        <p class="text-[10px] text-muted-foreground">
+          Routes via the <code class="bg-muted px-1 rounded">true</code> / <code class="bg-muted px-1 rounded">false</code> output
+          (an error counts as false). Use variable names directly, without braces:
+        </p>
+        <div class="space-y-0.5 text-[10px] font-mono text-muted-foreground">
+          <p>exists == true</p>
+          <p>http_status == 200 and orders &gt; 0</p>
+          <p>tier in ["gold", "platinum"]</p>
+          <p>caller_phone startsWith "9198"</p>
+        </div>
+        <p class="text-[10px] text-muted-foreground">
+          Values saved by an HTTP node's response mapping keep their JSON type (true, 4, "Rahul").
+          Other variables, like <code class="bg-muted px-1 rounded">caller_phone</code> and gathered digits, are text; use
+          <code class="bg-muted px-1 rounded">int(account_digits)</code> to compare as a number. An unset variable is
+          <code class="bg-muted px-1 rounded">nil</code>.
+        </p>
+      </div>
+    </template>
+
+    <!-- Delay: seconds -->
+    <template v-if="node.type === 'delay'">
+      <div class="space-y-1.5">
+        <Label class="text-xs">Wait (seconds)</Label>
+        <Input type="number" :model-value="String(config.seconds ?? 2)" @update:model-value="(v: string) => updateConfig('seconds', Math.min(60, Math.max(0.5, parseFloat(v) || 2)))" class="h-8 text-sm" min="0.5" max="60" step="0.5" />
+        <p class="text-[10px] text-muted-foreground">Pause the flow, in silence, before the next step (0.5–60s).</p>
+      </div>
+    </template>
+
     <!-- Goto Flow: flow selector -->
     <template v-if="node.type === 'goto_flow'">
       <div class="space-y-1.5">
@@ -506,6 +625,7 @@ const greetingTab = computed(() =>
     <template v-if="node.type === 'timing'">
       <div class="space-y-1.5">
         <Label class="text-xs">Schedule</Label>
+        <p class="text-[10px] text-muted-foreground">Times are in the organization's timezone (Settings → General).</p>
         <div v-for="(entry, idx) in schedule" :key="idx" class="flex items-center gap-1.5 text-xs">
           <span class="w-12 capitalize">{{ entry.day.slice(0, 3) }}</span>
           <Switch :checked="entry.enabled" @update:checked="(v: boolean) => updateScheduleEntry(Number(idx), 'enabled', v)" />

@@ -499,6 +499,7 @@ const typeLabel: Record<string, string> = {
     <template v-if="node.type === 'timing'">
       <div class="space-y-1.5">
         <Label class="text-xs">Schedule</Label>
+        <p class="text-[10px] text-muted-foreground">Times are in the organization's timezone (Settings → General).</p>
         <div v-for="(entry, idx) in schedule" :key="idx" class="flex items-center gap-1.5 text-xs">
           <span class="w-12 capitalize">{{ entry.day.slice(0, 3) }}</span>
           <Switch :checked="entry.enabled" @update:checked="(v: boolean) => updateScheduleEntry(Number(idx), 'enabled', v)" />
