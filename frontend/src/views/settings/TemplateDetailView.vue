@@ -10,6 +10,8 @@ import DetailPageLayout from '@/components/shared/DetailPageLayout.vue'
 import MetadataPanel from '@/components/shared/MetadataPanel.vue'
 import AuditLogPanel from '@/components/shared/AuditLogPanel.vue'
 import UnsavedChangesDialog from '@/components/shared/UnsavedChangesDialog.vue'
+import CarouselCardsEditor from '@/components/templates/CarouselCardsEditor.vue'
+import { carouselProblem, fromApi as carouselFromApi, newCarousel, type CarouselCard } from '@/components/templates/carousel'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -71,6 +73,7 @@ interface Template {
   footer_content: string
   buttons: any[]
   sample_values: any[]
+  carousel_cards?: any[]
   add_security_recommendation: boolean
   code_expiration_minutes: number
   created_by_name: string
@@ -94,6 +97,7 @@ const headerTooManyVariablesHint = 'Meta allows at most one variable in a TEXT h
 const templateId = computed(() => route.params.id as string)
 const isNew = computed(() => templateId.value === 'new')
 const isAuthentication = computed(() => form.value.category === 'AUTHENTICATION')
+const isCarousel = computed(() => !isAuthentication.value && form.value.header_type === 'CAROUSEL')
 
 // OTP type for auth templates — derived from the buttons array
 const authOtpType = computed(() => {
@@ -186,6 +190,7 @@ const form = ref({
   footer_content: '',
   buttons: [] as any[],
   sample_values: [] as any[],
+  carousel_cards: [] as CarouselCard[],
   add_security_recommendation: false,
   code_expiration_minutes: 0,
 })
@@ -356,6 +361,7 @@ const headerTypes = [
   { value: 'IMAGE', label: 'Image' },
   { value: 'VIDEO', label: 'Video' },
   { value: 'DOCUMENT', label: 'Document' },
+  { value: 'CAROUSEL', label: 'Carousel' },
 ]
 
 const statusVariant = computed(() => {
@@ -411,6 +417,7 @@ function syncForm() {
       example: Array.isArray(b.example) ? b.example[0] ?? '' : b.example,
     })),
     sample_values: template.value.sample_values || [],
+    carousel_cards: carouselFromApi(template.value.carousel_cards),
     add_security_recommendation: template.value.add_security_recommendation || false,
     code_expiration_minutes: template.value.code_expiration_minutes || 0,
   }
@@ -433,6 +440,14 @@ watch(form, () => {
   if (!template.value) return
   hasChanges.value = true
 }, { deep: true })
+
+// A carousel has no top-level buttons or footer: its buttons live on the cards.
+watch(() => form.value.header_type, (type) => {
+  if (type !== 'CAROUSEL') return
+  if (form.value.carousel_cards.length === 0) form.value.carousel_cards = newCarousel()
+  form.value.buttons = []
+  form.value.footer_content = ''
+})
 
 // Auto-configure form when switching to/from AUTHENTICATION category
 watch(() => form.value.category, (newCat, oldCat) => {
@@ -482,6 +497,13 @@ async function save() {
       return
     }
   }
+  if (isCarousel.value) {
+    const problem = carouselProblem(form.value.carousel_cards)
+    if (problem) {
+      toast.error(problem)
+      return
+    }
+  }
   if (isAuthentication.value && form.value.code_expiration_minutes && (form.value.code_expiration_minutes < 1 || form.value.code_expiration_minutes > 90)) {
     toast.error(t('templates.invalidExpiration', 'Code expiration must be between 1 and 90 minutes'))
     return
@@ -508,9 +530,10 @@ async function save() {
       header_type: isAuthentication.value ? 'NONE' : form.value.header_type,
       header_content: isAuthentication.value ? '' : form.value.header_content,
       body_content: isAuthentication.value ? '{{1}} is your verification code.' : form.value.body_content,
-      footer_content: isAuthentication.value ? '' : form.value.footer_content,
-      buttons: form.value.buttons,
+      footer_content: isAuthentication.value || isCarousel.value ? '' : form.value.footer_content,
+      buttons: isCarousel.value ? [] : form.value.buttons,
       sample_values: form.value.sample_values,
+      carousel_cards: isCarousel.value ? form.value.carousel_cards : [],
       add_security_recommendation: form.value.add_security_recommendation,
       code_expiration_minutes: form.value.code_expiration_minutes || 0,
     }
@@ -1012,8 +1035,18 @@ onMounted(async () => {
           </div>
         </div>
 
+        <!-- Carousel cards (replace the buttons and footer) -->
+        <div v-if="isCarousel" class="space-y-1.5">
+          <Label class="text-xs">{{ $t('templates.carouselCards', 'Cards') }}</Label>
+          <CarouselCardsEditor
+            v-model="form.carousel_cards"
+            :account="form.whatsapp_account"
+            :disabled="!canWrite || !isEditable"
+          />
+        </div>
+
         <!-- Buttons (hidden for auth templates — OTP managed via selector above) -->
-        <div v-if="!isAuthentication" class="space-y-3">
+        <div v-if="!isAuthentication && !isCarousel" class="space-y-3">
           <div class="flex items-center justify-between">
             <Label class="text-xs">{{ $t('templates.buttons', 'Buttons') }} <span class="text-muted-foreground font-normal">({{ $t('templates.maxButtonsHint', 'up to 3, optional') }})</span></Label>
             <Button
@@ -1141,7 +1174,7 @@ onMounted(async () => {
           </div>
         </div>
 
-        <div v-if="!isAuthentication" class="space-y-1.5">
+        <div v-if="!isAuthentication && !isCarousel" class="space-y-1.5">
           <Label class="text-xs">{{ $t('templates.footerContent', 'Footer Content') }}</Label>
           <Textarea
             v-model="form.footer_content"
@@ -1215,7 +1248,7 @@ onMounted(async () => {
       <div v-if="template" class="py-2">
         <div class="bg-gray-800 light:bg-[#e5ddd5] rounded-lg p-4">
           <div class="bg-gray-700 light:bg-white rounded-lg shadow max-w-[280px] overflow-hidden">
-            <div v-if="template.header_type && template.header_type !== 'NONE'" class="p-3 border-b">
+            <div v-if="template.header_type && template.header_type !== 'NONE' && template.header_type !== 'CAROUSEL'" class="p-3 border-b">
               <div v-if="template.header_type === 'TEXT'" class="font-semibold">{{ previewHeader }}</div>
               <div v-else class="h-32 bg-gray-600 light:bg-gray-200 rounded flex items-center justify-center">
                 <span class="text-sm text-gray-400">{{ template.header_type }}</span>
@@ -1232,6 +1265,23 @@ onMounted(async () => {
                 <button class="w-full py-2 text-sm text-blue-500 hover:bg-gray-600 light:hover:bg-gray-50">
                   {{ btn.text || btn.title || 'Button' }}
                 </button>
+              </div>
+            </div>
+          </div>
+          <div v-if="template.header_type === 'CAROUSEL'" class="mt-2 flex gap-2 overflow-x-auto pb-1">
+            <div
+              v-for="(card, idx) in template.carousel_cards || []"
+              :key="idx"
+              class="shrink-0 w-[200px] bg-gray-700 light:bg-white rounded-lg shadow overflow-hidden"
+            >
+              <div class="h-24 bg-gray-600 light:bg-gray-200 flex items-center justify-center">
+                <span class="text-xs text-gray-400">{{ card.header_format }}</span>
+              </div>
+              <p class="p-2 text-xs whitespace-pre-wrap">{{ card.body }}</p>
+              <div class="border-t">
+                <div v-for="(btn, b) in card.buttons || []" :key="b" class="border-b last:border-b-0 py-1.5 text-center text-xs text-blue-500">
+                  {{ btn.text || 'Button' }}
+                </div>
               </div>
             </div>
           </div>

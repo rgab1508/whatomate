@@ -92,6 +92,12 @@ type TemplateComponent struct {
 	Text    string           `json:"text,omitempty"`
 	Buttons []TemplateButton `json:"buttons,omitempty"`
 	Example *TemplateExample `json:"example,omitempty"`
+	Cards   []TemplateCard   `json:"cards,omitempty"` // CAROUSEL only
+}
+
+// TemplateCard is one card of a CAROUSEL component.
+type TemplateCard struct {
+	Components []TemplateComponent `json:"components"`
 }
 
 // TemplateButton represents a button in a template.

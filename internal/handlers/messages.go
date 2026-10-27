@@ -221,6 +221,13 @@ func (a *App) SendOutgoingMessage(ctx context.Context, req OutgoingMessageReques
 			// Add URL/COPY_CODE button components with dynamic params
 			buttonComponents := whatsapp.ButtonURLParamsToComponents(req.ButtonURLParams, req.Template.Buttons)
 			components = append(components, buttonComponents...)
+			if req.Template.HeaderType == whatsapp.HeaderTypeCarousel {
+				carousel, err := whatsapp.CarouselSendComponent(req.Template.CarouselCards)
+				if err != nil {
+					return "", err
+				}
+				components = append(components, carousel)
+			}
 			return a.WhatsApp.SendTemplateMessage(sendCtx, waAccount, rcpt, req.Template.Name, req.Template.Language, components)
 
 		case models.MessageTypeFlow:

@@ -27,6 +27,7 @@ type TemplateRequest struct {
 	FooterContent   string `json:"footer_content"`
 	Buttons         []any  `json:"buttons"`
 	SampleValues    []any  `json:"sample_values"`
+	CarouselCards   []any  `json:"carousel_cards"` // header_type CAROUSEL only
 
 	// Authentication template fields
 	AddSecurityRecommendation bool `json:"add_security_recommendation"` // Add "For your security, do not share this code."
@@ -50,6 +51,7 @@ type TemplateResponse struct {
 	FooterContent             string    `json:"footer_content"`
 	Buttons                   []any     `json:"buttons"`
 	SampleValues              []any     `json:"sample_values"`
+	CarouselCards             []any     `json:"carousel_cards"`
 	AddSecurityRecommendation bool      `json:"add_security_recommendation"`
 	CodeExpirationMinutes     int       `json:"code_expiration_minutes"`
 	QualityRating             string    `json:"quality_rating"`
@@ -144,6 +146,11 @@ func (a *App) CreateTemplate(r *fastglue.Request) error {
 				return r.SendErrorEnvelope(fasthttp.StatusBadRequest, err.Error(), nil, "")
 			}
 		}
+		if strings.ToUpper(req.HeaderType) == whatsapp.HeaderTypeCarousel {
+			if err := whatsapp.ValidateCarousel(req.BodyContent, req.CarouselCards, false); err != nil {
+				return r.SendErrorEnvelope(fasthttp.StatusBadRequest, err.Error(), nil, "")
+			}
+		}
 	}
 
 	// Verify account belongs to organization
@@ -180,6 +187,7 @@ func (a *App) CreateTemplate(r *fastglue.Request) error {
 		FooterContent:             req.FooterContent,
 		Buttons:                   convertToJSONBArray(req.Buttons),
 		SampleValues:              convertToJSONBArray(req.SampleValues),
+		CarouselCards:             carouselCardsFor(req.HeaderType, req.CarouselCards),
 		AddSecurityRecommendation: req.AddSecurityRecommendation,
 		CodeExpirationMinutes:     req.CodeExpirationMinutes,
 		CreatedByID:               &userID,
@@ -307,6 +315,14 @@ func (a *App) UpdateTemplate(r *fastglue.Request) error {
 	if req.SampleValues != nil {
 		template.SampleValues = convertToJSONBArray(req.SampleValues)
 	}
+	if req.CarouselCards != nil || template.HeaderType != whatsapp.HeaderTypeCarousel {
+		template.CarouselCards = carouselCardsFor(template.HeaderType, req.CarouselCards)
+	}
+	if !isAuthTemplate && template.HeaderType == whatsapp.HeaderTypeCarousel {
+		if err := whatsapp.ValidateCarousel(template.BodyContent, template.CarouselCards, false); err != nil {
+			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, err.Error(), nil, "")
+		}
+	}
 	template.AddSecurityRecommendation = req.AddSecurityRecommendation
 	template.CodeExpirationMinutes = req.CodeExpirationMinutes
 	template.UpdatedByID = &userID
@@ -393,6 +409,12 @@ func (a *App) SubmitTemplate(r *fastglue.Request) error {
 				template.HeaderType, strings.ToLower(template.HeaderType)), nil, "")
 	}
 
+	if template.HeaderType == whatsapp.HeaderTypeCarousel {
+		if err := whatsapp.ValidateCarousel(template.BodyContent, template.CarouselCards, true); err != nil {
+			return r.SendErrorEnvelope(fasthttp.StatusBadRequest, err.Error(), nil, "")
+		}
+	}
+
 	// Get the WhatsApp account
 	account, err := a.resolveWhatsAppAccount(orgID, template.WhatsAppAccount)
 	if err != nil {
@@ -451,6 +473,7 @@ func (a *App) submitTemplateToMeta(account *models.WhatsAppAccount, template *mo
 		FooterContent:             template.FooterContent,
 		Buttons:                   template.Buttons,
 		SampleValues:              template.SampleValues,
+		CarouselCards:             template.CarouselCards,
 		AddSecurityRecommendation: template.AddSecurityRecommendation,
 		CodeExpirationMinutes:     template.CodeExpirationMinutes,
 	}
@@ -517,8 +540,12 @@ func (a *App) SyncTemplates(r *fastglue.Request) error {
 		}
 
 		// Parse components
+		var carousel *whatsapp.TemplateComponent
 		for _, comp := range metaTemplate.Components {
 			switch comp.Type {
+			case "CAROUSEL":
+				template.HeaderType = whatsapp.HeaderTypeCarousel
+				carousel = &comp
 			case "HEADER":
 				template.HeaderType = comp.Format
 				if comp.Text != "" {
@@ -544,6 +571,10 @@ func (a *App) SyncTemplates(r *fastglue.Request) error {
 			orgID, account.Name, template.Name, template.Language).First(&existing).Error; err == nil {
 			// Update existing and restore if soft-deleted (explicitly set deleted_at to NULL)
 			template.ID = existing.ID
+			template.CarouselCards = models.JSONBArray{}
+			if carousel != nil {
+				template.CarouselCards = whatsapp.CarouselCardsFromMeta(*carousel, existing.CarouselCards)
+			}
 			updates := map[string]any{
 				"meta_template_id": template.MetaTemplateID,
 				"display_name":     template.DisplayName,
@@ -554,6 +585,7 @@ func (a *App) SyncTemplates(r *fastglue.Request) error {
 				"body_content":     template.BodyContent,
 				"footer_content":   template.FooterContent,
 				"buttons":          template.Buttons,
+				"carousel_cards":   template.CarouselCards,
 				"deleted_at":       nil, // Restore soft-deleted template
 			}
 			// Only update quality_rating when Meta returned a value; otherwise
@@ -564,6 +596,9 @@ func (a *App) SyncTemplates(r *fastglue.Request) error {
 			a.DB.Unscoped().Model(&template).Updates(updates)
 		} else {
 			// Create new
+			if carousel != nil {
+				template.CarouselCards = whatsapp.CarouselCardsFromMeta(*carousel, nil)
+			}
 			a.DB.Create(&template)
 		}
 		synced++
@@ -611,6 +646,7 @@ func templateToResponse(t models.Template) TemplateResponse {
 		FooterContent:             t.FooterContent,
 		Buttons:                   convertFromJSONBArray(t.Buttons),
 		SampleValues:              convertFromJSONBArray(t.SampleValues),
+		CarouselCards:             convertFromJSONBArray(t.CarouselCards),
 		AddSecurityRecommendation: t.AddSecurityRecommendation,
 		CodeExpirationMinutes:     t.CodeExpirationMinutes,
 		CreatedAt:                 t.CreatedAt.Format("2006-01-02T15:04:05Z"),
@@ -631,6 +667,14 @@ func normalizeTemplateName(name string) string {
 		}
 	}
 	return result.String()
+}
+
+// carouselCardsFor keeps cards only on carousel templates.
+func carouselCardsFor(headerType string, cards []any) models.JSONBArray {
+	if strings.ToUpper(headerType) != whatsapp.HeaderTypeCarousel {
+		return models.JSONBArray{}
+	}
+	return convertToJSONBArray(cards)
 }
 
 func convertToJSONBArray(arr []any) models.JSONBArray {

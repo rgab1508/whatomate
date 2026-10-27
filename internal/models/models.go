@@ -438,6 +438,8 @@ type Template struct {
 	FooterContent   string     `gorm:"type:text" json:"footer_content"`
 	Buttons         JSONBArray `gorm:"type:jsonb;default:'[]'" json:"buttons"`
 	SampleValues    JSONBArray `gorm:"type:jsonb;default:'[]'" json:"sample_values"`
+	// Cards of a carousel template (HeaderType CAROUSEL); see pkg/whatsapp/carousel.go.
+	CarouselCards JSONBArray `gorm:"type:jsonb;default:'[]'" json:"carousel_cards"`
 
 	// Authentication template fields
 	AddSecurityRecommendation bool `gorm:"default:false" json:"add_security_recommendation"`

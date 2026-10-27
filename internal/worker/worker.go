@@ -302,6 +302,13 @@ func (w *Worker) sendTemplateMessage(ctx context.Context, account *models.WhatsA
 	// Add auto-generated button components (Flow needs flow_token)
 	flowComponents := whatsapp.AutoButtonComponents(template.Buttons)
 	components = append(components, flowComponents...)
+	if template.HeaderType == whatsapp.HeaderTypeCarousel {
+		carousel, err := whatsapp.CarouselSendComponent(template.CarouselCards)
+		if err != nil {
+			return "", err
+		}
+		components = append(components, carousel)
+	}
 
 	rcpt := whatsapp.Recipient{Phone: recipient.PhoneNumber}
 	return w.WhatsApp.SendTemplateMessage(ctx, waAccount, rcpt, template.Name, template.Language, components)
@@ -314,7 +321,7 @@ func (w *Worker) sendMarketingTemplateMessage(ctx context.Context, account *mode
 
 	var components []map[string]any
 
-	if template.HeaderType != "" && template.HeaderType != "TEXT" {
+	if template.HeaderType != "" && template.HeaderType != "TEXT" && template.HeaderType != whatsapp.HeaderTypeCarousel {
 		if campaignHeaderMediaID != "" {
 			headerParam := buildMediaParameter(template.HeaderType, "id", campaignHeaderMediaID)
 			if headerParam != nil {
@@ -355,6 +362,13 @@ func (w *Worker) sendMarketingTemplateMessage(ctx context.Context, account *mode
 			"type":       "body",
 			"parameters": bodyParams,
 		})
+	}
+	if template.HeaderType == whatsapp.HeaderTypeCarousel {
+		carousel, err := whatsapp.CarouselSendComponent(template.CarouselCards)
+		if err != nil {
+			return "", err
+		}
+		components = append(components, carousel)
 	}
 
 	return w.WhatsApp.SendMarketingTemplateMessage(ctx, waAccount, recipient.PhoneNumber, template.Name, template.Language, components)

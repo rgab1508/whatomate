@@ -16,6 +16,7 @@ import { Plus, RefreshCw, FileText, Pencil, Trash2, Loader2, MessageSquare, Imag
 import { getErrorMessage } from '@/lib/api-utils'
 import { useSearchPagination } from '@/composables/useSearchPagination'
 import { getQualityBadgeClass, getQualityRatingLabel } from '@/lib/utils'
+import { accountsToSync } from '@/lib/templateSync'
 
 const { t } = useI18n()
 
@@ -23,6 +24,8 @@ interface WhatsAppAccount {
   id: string
   name: string
   phone_id: string
+  business_id?: string
+  is_default_outgoing?: boolean
 }
 
 interface Template {
@@ -211,17 +214,20 @@ async function fetchTemplates() {
 }
 
 async function syncTemplates() {
-  if (!selectedAccount.value || selectedAccount.value === 'all') {
+  const names = accountsToSync(accounts.value, selectedAccount.value)
+  if (names.length === 0) {
     toast.error(t('templates.selectAccountFirst'))
     return
   }
 
   isSyncing.value = true
   try {
-    const response = await api.post('/templates/sync', {
-      whatsapp_account: selectedAccount.value
-    })
-    toast.success(response.data.data.message || t('templates.syncSuccess'))
+    const messages: string[] = []
+    for (const name of names) {
+      const response = await api.post('/templates/sync', { whatsapp_account: name })
+      messages.push(response.data.data.message)
+    }
+    toast.success(messages.filter(Boolean).join(' · ') || t('templates.syncSuccess'))
     await fetchTemplates()
   } catch (error) {
     toast.error(getErrorMessage(error, t('templates.syncFailed')))
@@ -299,7 +305,7 @@ function getHeaderIcon(type: string) {
   <div class="flex flex-col h-full bg-[#0a0a0b] light:bg-gray-50">
     <PageHeader :title="$t('templates.title')" :subtitle="$t('templates.subtitle')" :icon="FileText" icon-gradient="bg-gradient-to-br from-blue-500 to-cyan-600 shadow-blue-500/20">
       <template #actions>
-        <Button variant="outline" size="sm" @click="syncTemplates" :disabled="isSyncing || !selectedAccount || selectedAccount === 'all'">
+        <Button variant="outline" size="sm" @click="syncTemplates" :disabled="isSyncing || accounts.length === 0">
           <Loader2 v-if="isSyncing" class="h-4 w-4 mr-2 animate-spin" />
           <RefreshCw v-else class="h-4 w-4 mr-2" />
           {{ $t('templates.syncFromMeta') }}
@@ -416,7 +422,7 @@ function getHeaderIcon(type: string) {
                 </template>
                 <template #empty-action>
                   <div class="flex items-center justify-center gap-2">
-                    <Button variant="outline" size="sm" @click="syncTemplates" :disabled="!selectedAccount || selectedAccount === 'all'">
+                    <Button variant="outline" size="sm" @click="syncTemplates" :disabled="isSyncing || accounts.length === 0">
                       <RefreshCw class="h-4 w-4 mr-2" />
                       {{ $t('templates.syncFromMeta') }}
                     </Button>

@@ -21,6 +21,7 @@ type TemplateSubmission struct {
 	FooterContent   string
 	Buttons         []any
 	SampleValues    []any // For named: [{param_name: "name", value: "John"}, ...]
+	CarouselCards   []any // HeaderType CAROUSEL only; see carousel.go
 
 	// Authentication template fields
 	AddSecurityRecommendation bool
@@ -45,6 +46,11 @@ func (c *Client) SubmitTemplate(ctx context.Context, account *Account, template 
 	// Authentication templates have a different component structure per Meta API
 	if strings.ToUpper(template.Category) == "AUTHENTICATION" {
 		components = c.buildAuthComponents(template)
+	} else if strings.ToUpper(template.HeaderType) == HeaderTypeCarousel {
+		components, compErr = c.buildCarouselComponents(template)
+		if compErr != nil {
+			return "", compErr
+		}
 	} else {
 		components, compErr = c.buildStandardComponents(template)
 		if compErr != nil {
